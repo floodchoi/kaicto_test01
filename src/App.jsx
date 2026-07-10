@@ -8,12 +8,37 @@ const fmtDateTime = (d) =>
     year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
   });
 
-// 선택 가능한 Gemini 모델
+// 기본 모델 목록 (키가 없거나 실시간 조회 실패 시 폴백)
 const MODELS = [
   { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash — 빠르고 저렴 (권장)" },
   { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro — 고성능" },
   { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
 ];
+
+// 실시간 모델 목록: Gemini 모델 목록 API에서 현재 계정 키로 사용 가능한 모델을 조회.
+// generateContent를 지원하는 gemini-* 모델만 (요약·전사·제목 추천이 모두 이 방식 사용).
+async function listGeminiModels(apiKey) {
+  const res = await gfetch(
+    "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000",
+    { headers: { "x-goog-api-key": apiKey } },
+    "모델 목록 조회",
+  );
+  if (!res.ok) throw new Error(await geminiErr(res));
+  const models = ((await res.json()).models ?? [])
+    .filter(
+      (m) =>
+        (m.supportedGenerationMethods ?? []).includes("generateContent") &&
+        m.name?.startsWith("models/gemini"),
+    )
+    .map((m) => ({
+      id: m.name.replace(/^models\//, ""),
+      label: `${m.displayName ?? m.name}${m.inputTokenLimit ? ` · 입력 ${Math.round(m.inputTokenLimit / 1000)}k` : ""}`,
+    }));
+  // 최신 세대가 위로 오게 정렬 (id 내림차순: 2.5 > 2.0 > 1.5)
+  models.sort((a, b) => b.id.localeCompare(a.id));
+  if (!models.length) throw new Error("사용 가능한 모델이 없습니다.");
+  return models;
+}
 
 // ponytail: 키는 브라우저 localStorage에 보관(본인 키 사용 모델). 서버 DB에 저장 안 함.
 // 팀 공유·다중 사용자로 가면 서버 측 암호화 저장으로 전환.
@@ -515,6 +540,35 @@ function Settings({ settings, onSave, onClose }) {
   const [sttApiKey, setSttApiKey] = useState(settings.sttApiKey);
   const [sttModel, setSttModel] = useState(settings.sttModel);
 
+  // 실시간 모델 목록 (키가 있으면 자동 조회, 실패 시 기본 목록 폴백)
+  const [liveModels, setLiveModels] = useState(null); // null=미조회, []가 아닌 배열=성공
+  const [modelsStatus, setModelsStatus] = useState("");
+  const refreshModels = async (key) => {
+    if (!key?.trim()) {
+      setModelsStatus("키 입력 후 새로고침하면 실시간 목록을 불러옵니다.");
+      return;
+    }
+    setModelsStatus("모델 목록 불러오는 중…");
+    try {
+      const list = await listGeminiModels(key.trim());
+      setLiveModels(list);
+      setModelsStatus(`실시간 사용 가능 모델 ${list.length}개`);
+    } catch (e) {
+      setLiveModels(null);
+      setModelsStatus(`목록 조회 실패 (${e.message}) — 기본 목록 사용`);
+    }
+  };
+  useEffect(() => {
+    refreshModels(settings.apiKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 선택 UI에 쓸 목록: 실시간 목록 우선, 현재 선택값이 목록에 없으면 포함시켜 유지
+  const modelOptions = (() => {
+    const base = liveModels ?? MODELS;
+    return base.some((m) => m.id === model) ? base : [{ id: model, label: model }, ...base];
+  })();
+
   const save = () => {
     const next = {
       apiKey: apiKey.trim(),
@@ -557,6 +611,18 @@ function Settings({ settings, onSave, onClose }) {
         </a>
         <p className="mt-1 text-xs text-slate-400">오디오 전사는 항상 Gemini를 사용하므로 이 키가 필요합니다.</p>
 
+        {/* 실시간 모델 목록 상태 + 새로고침 */}
+        <div className="mt-2 flex items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2">
+          <span className="text-xs text-slate-500">{modelsStatus || "실시간 모델 목록"}</span>
+          <button
+            type="button"
+            onClick={() => refreshModels(apiKey)}
+            className="shrink-0 text-xs font-medium text-teal-700 hover:underline"
+          >
+            🔄 모델 목록 새로고침
+          </button>
+        </div>
+
         {/* 요약 제공자 */}
         <div className="mt-6 border-t border-slate-100 pt-5">
           <h3 className="text-sm font-semibold text-slate-700">요약 제공자</h3>
@@ -575,7 +641,7 @@ function Settings({ settings, onSave, onClose }) {
             <>
               <label className="mt-4 block text-sm font-medium text-slate-700">Gemini 요약 모델</label>
               <select value={model} onChange={(e) => setModel(e.target.value)} className={INPUT_CLS + " bg-white"}>
-                {MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+                {modelOptions.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
               </select>
             </>
           ) : (
@@ -608,7 +674,7 @@ function Settings({ settings, onSave, onClose }) {
           <input list="stt-models" value={sttModel} onChange={(e) => setSttModel(e.target.value.trim())}
             placeholder="비워두면 위 Gemini 요약 모델과 동일" className={INPUT_CLS} />
           <datalist id="stt-models">
-            {MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+            {modelOptions.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
           </datalist>
           <p className="mt-1 text-xs text-slate-500">
             목록에서 고르거나 다른 Gemini 모델 ID를 직접 입력할 수 있습니다 (예: gemini-2.5-flash-lite).
