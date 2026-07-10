@@ -11,9 +11,9 @@ try {
 }
 const isLocal = host === "localhost" || host === "127.0.0.1" || host === "::1";
 
-// - prepare:false : Supabase 트랜잭션 풀러(6543)·Neon 풀러는 prepared statement 미지원 → 필수
+// - prepare:false : Neon 풀러(및 Supabase 트랜잭션 풀러)는 prepared statement 미지원 → 필수
 // - max:1 + idle_timeout : 서버리스 인스턴스당 커넥션 최소화
-// - ssl:"require" : 원격은 SSL 강제(인증서 검증 없이 암호화). Supabase URL에 sslmode 없어도 동작.
+// - ssl:"require" : 원격은 SSL 강제(인증서 검증 없이 암호화). URL에 sslmode 없어도 동작.
 export const sql = postgres(url, {
   prepare: false,
   max: 1,
