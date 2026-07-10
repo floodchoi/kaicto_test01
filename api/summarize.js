@@ -1,3 +1,5 @@
+import { wrap } from "./_wrap.js";
+
 export const config = { maxDuration: 60 };
 
 const SYSTEM_PROMPT = `너는 회의록 정리 전문가다. 사용자가 준 회의 스크립트를 분석해서 JSON으로 정리한다.
@@ -41,7 +43,7 @@ const RESPONSE_SCHEMA = {
   propertyOrdering: ["summary", "agenda", "action_items", "tags"],
 };
 
-export default async function handler(req, res) {
+export default wrap(async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
 
   const { title, text, apiKey, model } = req.body ?? {};
@@ -80,4 +82,4 @@ export default async function handler(req, res) {
 
   // DB 저장 안 함 — 요약 결과만 반환. 저장은 사용자가 미리보기 확인 후 POST /api/meetings.
   res.status(200).json(JSON.parse(raw));
-}
+});

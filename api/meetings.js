@@ -1,6 +1,7 @@
 import { sql } from "./_db.js";
+import { wrap } from "./_wrap.js";
 
-export default async function handler(req, res) {
+export default wrap(async function handler(req, res) {
   // 미리보기 확인 후 저장: summarize 결과 + 원문을 받아 DB에 기록
   if (req.method === "POST") {
     const { title, text, summary, agenda, action_items, tags } = req.body ?? {};
@@ -39,4 +40,4 @@ export default async function handler(req, res) {
         ORDER BY created_at DESC`;
 
   res.status(200).json(rows);
-}
+});
