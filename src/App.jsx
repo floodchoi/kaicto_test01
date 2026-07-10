@@ -33,7 +33,7 @@ async function api(path, opts) {
       ...(token && { Authorization: `Bearer ${token}` }),
     },
   });
-  if (res.status === 401 && path !== "/api/login") {
+  if (res.status === 401 && path !== "/api/auth") {
     // 토큰 만료/무효 → 로그인 화면으로 (reload 시 토큰 없어 Login 표시)
     localStorage.removeItem("auth_token");
     location.reload();
@@ -107,15 +107,73 @@ EN: <영어 원문>
 KO: <한국어 번역>
 화자가 구분되면 '화자1:', '화자2:'처럼 표기해라.`;
 
+// 분할 전사 시 이어지는 조각용: 직전 조각 끝부분을 참고로 넘겨 문맥·화자 라벨 연속성 유지
+const contPrompt = (prevTail) =>
+  `${TRANSCRIBE_PROMPT}\n\n(참고) 이 오디오는 긴 녹음의 이어지는 조각이다. 직전 조각의 마지막 부분: "…${prevTail}"\n위 내용은 다시 쓰지 말고, 이 조각의 내용만 이어서 전사해라. 화자 번호는 직전 조각과 일관되게 붙여라.`;
+
+/* ── 오디오 분할: 브라우저에서 디코딩 → 16kHz 모노 → N분 WAV 조각 ──
+   긴 파일은 조각마다 전사해 결과가 점진적으로 도착(준실시간 체감).      */
+const CHUNK_SEC = 300; // 5분
+const SPLIT_RATE = 16000; // 음성 전사에 충분, 파일 크기 최소화
+
+function encodeWav(samples, sampleRate) {
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const v = new DataView(buf);
+  const str = (off, s) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); };
+  str(0, "RIFF"); v.setUint32(4, 36 + samples.length * 2, true); str(8, "WAVE");
+  str(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, sampleRate, true); v.setUint32(28, sampleRate * 2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, "data"); v.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return buf;
+}
+
+// 짧은 파일이면 null 반환(통짜 경로 사용 — 원본 그대로 보내 품질 손실 없음)
+async function splitAudioToWavChunks(file) {
+  const raw = await file.arrayBuffer();
+  const probe = new AudioContext();
+  let decoded;
+  try {
+    decoded = await probe.decodeAudioData(raw);
+  } finally {
+    probe.close();
+  }
+  if (decoded.duration <= CHUNK_SEC * 1.5) return null;
+
+  // 모노 16kHz로 리샘플 (OfflineAudioContext)
+  const frames = Math.ceil(decoded.duration * SPLIT_RATE);
+  const off = new OfflineAudioContext(1, frames, SPLIT_RATE);
+  const src = off.createBufferSource();
+  src.buffer = decoded;
+  src.connect(off.destination);
+  src.start();
+  const mono = (await off.startRendering()).getChannelData(0);
+
+  const per = CHUNK_SEC * SPLIT_RATE;
+  const chunks = [];
+  for (let i = 0; i < mono.length; i += per) {
+    chunks.push(
+      new File([encodeWav(mono.subarray(i, i + per), SPLIT_RATE)], `chunk-${chunks.length + 1}.wav`, {
+        type: "audio/wav",
+      }),
+    );
+  }
+  return chunks;
+}
+
 // 전사도 브라우저에서 직접 Gemini 호출. 스트리밍(SSE)으로 받아 조각마다 onDelta 콜백.
-async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta) {
+async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, prompt = TRANSCRIBE_PROMPT) {
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: TRANSCRIBE_PROMPT }, { fileData: { mimeType, fileUri } }] }],
+        contents: [{ parts: [{ text: prompt }, { fileData: { mimeType, fileUri } }] }],
       }),
     },
   );
@@ -285,8 +343,10 @@ function Tag({ children }) {
   );
 }
 
-/* ── 로그인 ──────────────────────────────────────────────── */
+/* ── 로그인 / 회원가입 ───────────────────────────────────── */
 function Login({ onLogin }) {
+  const [mode, setMode] = useState("login"); // "login" | "signup"
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -296,17 +356,20 @@ function Login({ onLogin }) {
     setLoading(true);
     setError(null);
     try {
-      const { token } = await api("/api/login", {
+      const { token, email: savedEmail } = await api("/api/auth", {
         method: "POST",
-        body: JSON.stringify({ password }),
+        body: JSON.stringify({ action: mode, email, password }),
       });
       localStorage.setItem("auth_token", token);
+      localStorage.setItem("auth_email", savedEmail);
       onLogin();
     } catch (err) {
       setError(err.message);
       setLoading(false);
     }
   };
+
+  const isSignup = mode === "signup";
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4">
@@ -315,25 +378,47 @@ function Login({ onLogin }) {
           <span className="text-2xl">📝</span>
           <h1 className="text-lg font-bold text-slate-800">Meeting Minutes</h1>
         </div>
-        <p className="mt-2 text-sm text-slate-500">비밀번호를 입력해 로그인하세요.</p>
+        <p className="mt-2 text-sm text-slate-500">
+          {isSignup ? "새 계정을 만드세요." : "이메일과 비밀번호로 로그인하세요."}
+        </p>
 
+        <label className="mt-5 block text-sm font-medium text-slate-700">이메일</label>
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="you@example.com"
+          autoFocus
+          autoComplete="email"
+          className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+        />
+
+        <label className="mt-4 block text-sm font-medium text-slate-700">비밀번호</label>
         <input
           type="password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          placeholder="비밀번호"
-          autoFocus
-          className="mt-5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+          placeholder={isSignup ? "8자 이상" : "비밀번호"}
+          autoComplete={isSignup ? "new-password" : "current-password"}
+          className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
         />
 
         {error && <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">⚠️ {error}</p>}
 
         <button
           type="submit"
-          disabled={loading || !password}
+          disabled={loading || !email || password.length < 8}
           className="mt-5 w-full rounded-xl bg-teal-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-teal-600 disabled:opacity-40"
         >
-          {loading ? "확인 중…" : "로그인"}
+          {loading ? "확인 중…" : isSignup ? "회원가입" : "로그인"}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => { setMode(isSignup ? "login" : "signup"); setError(null); }}
+          className="mt-4 w-full text-center text-sm text-teal-700 hover:underline"
+        >
+          {isSignup ? "이미 계정이 있으신가요? 로그인" : "계정이 없으신가요? 회원가입"}
         </button>
       </form>
     </div>
@@ -573,15 +658,43 @@ function NewMeeting({ settings, onDone, onCancel, onOpenSettings }) {
     setError(null);
     setLiveText("");
     try {
-      // 1) 브라우저 → Gemini Files API 직접 업로드 → fileUri (업로드·전사는 같은 키여야 함)
-      const { fileUri, mimeType } = await uploadAudioToGemini(audioFile, sttKey, setStage);
-      // 2) 전사도 브라우저에서 직접, 스트리밍으로 조각마다 진행창 갱신
-      setStage("전사 중…");
-      const t = await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, (delta) =>
-        setLiveText((prev) => prev + delta),
-      );
+      // 긴 파일은 5분 조각으로 분할 → 조각마다 전사 결과가 도착 (준실시간 체감)
+      let chunks = null;
+      try {
+        setStage("오디오 분석 중…");
+        chunks = await splitAudioToWavChunks(audioFile);
+      } catch {
+        chunks = null; // 디코딩 실패(특이 코덱 등) → 통짜 전사로 폴백
+      }
+
+      let acc = "";
+      if (chunks) {
+        for (let i = 0; i < chunks.length; i++) {
+          const label = `조각 ${i + 1}/${chunks.length}`;
+          const { fileUri, mimeType } = await uploadAudioToGemini(chunks[i], sttKey, (s) =>
+            setStage(`${label} · ${s}`),
+          );
+          setStage(`${label} · 전사 중…`);
+          const prevTail = acc.slice(-200).trim();
+          const t = await transcribeWithGemini(
+            fileUri, mimeType, sttKey, sttModel,
+            (delta) => setLiveText((prev) => prev + delta),
+            prevTail ? contPrompt(prevTail) : TRANSCRIBE_PROMPT,
+          );
+          acc = acc ? acc.trimEnd() + "\n" + t.trim() : t.trim();
+          setLiveText(acc + "\n");
+        }
+      } else {
+        // 짧은 파일(또는 분할 실패): 원본 그대로 통짜 전사
+        const { fileUri, mimeType } = await uploadAudioToGemini(audioFile, sttKey, setStage);
+        setStage("전사 중…");
+        acc = await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, (delta) =>
+          setLiveText((prev) => prev + delta),
+        );
+      }
+
       // 완료 → 전체 텍스트를 입력란으로 이동
-      setText((prev) => (prev.trim() ? prev.trimEnd() + "\n\n" + t : t));
+      setText((prev) => (prev.trim() ? prev.trimEnd() + "\n\n" + acc : acc));
     } catch (e) {
       setError(e.message);
     } finally {
@@ -902,6 +1015,7 @@ export default function App() {
 
   const logout = () => {
     localStorage.removeItem("auth_token");
+    localStorage.removeItem("auth_email");
     setAuthed(false);
     setView({ name: "list" });
   };
@@ -920,6 +1034,9 @@ export default function App() {
           >
             ⚙️ 설정
           </button>
+          <span className="hidden text-xs text-slate-400 sm:inline">
+            {localStorage.getItem("auth_email")}
+          </span>
           <button
             onClick={logout}
             title="로그아웃"

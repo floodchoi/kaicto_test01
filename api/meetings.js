@@ -3,7 +3,8 @@ import { wrap } from "./_wrap.js";
 import { requireAuth } from "./_auth.js";
 
 export default wrap(async function handler(req, res) {
-  if (!requireAuth(req, res)) return;
+  const userId = requireAuth(req, res);
+  if (!userId) return;
 
   // 미리보기 확인 후 저장: summarize 결과 + 원문을 받아 DB에 기록
   if (req.method === "POST") {
@@ -15,8 +16,8 @@ export default wrap(async function handler(req, res) {
     if ((action_items?.length ?? 0) > 100) return res.status(400).json({ error: "액션 아이템이 너무 많습니다." });
 
     const [meeting] = await sql`
-      INSERT INTO meetings (title, raw_text, summary, agenda, tags)
-      VALUES (${title}, ${text}, ${summary ?? []}, ${sql.json(agenda ?? [])}, ${tags ?? []})
+      INSERT INTO meetings (user_id, title, raw_text, summary, agenda, tags)
+      VALUES (${userId}, ${title}, ${text}, ${summary ?? []}, ${sql.json(agenda ?? [])}, ${tags ?? []})
       RETURNING *`;
 
     const items = [];
@@ -37,12 +38,14 @@ export default wrap(async function handler(req, res) {
   const rows = q
     ? await sql`
         SELECT id, title, summary, tags, created_at FROM meetings
-        WHERE title ILIKE ${"%" + q + "%"}
+        WHERE user_id = ${userId}
+          AND (title ILIKE ${"%" + q + "%"}
            OR raw_text ILIKE ${"%" + q + "%"}
-           OR ${q} = ANY(tags)
+           OR ${q} = ANY(tags))
         ORDER BY created_at DESC`
     : await sql`
         SELECT id, title, summary, tags, created_at FROM meetings
+        WHERE user_id = ${userId}
         ORDER BY created_at DESC`;
 
   res.status(200).json(rows);

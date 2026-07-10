@@ -1,8 +1,16 @@
 -- Meeting Minutes Summarizer MVP schema
 -- Neon(또는 아무 PostgreSQL) SQL 에디터에서 1회 실행
 
+CREATE TABLE users (
+  id            SERIAL PRIMARY KEY,
+  email         TEXT NOT NULL UNIQUE,   -- 소문자 정규화해 저장
+  password_hash TEXT NOT NULL,          -- scrypt "salt:hash"
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE meetings (
   id         SERIAL PRIMARY KEY,
+  user_id    INT REFERENCES users(id) ON DELETE CASCADE,
   title      TEXT NOT NULL,
   raw_text   TEXT NOT NULL,              -- 회의 원문 스크립트
   summary    TEXT[] NOT NULL DEFAULT '{}',  -- 3줄 요약
@@ -22,3 +30,10 @@ CREATE TABLE action_items (
 
 -- ponytail: 검색은 ILIKE로 시작. 회의록 수천 건 넘어가면 pg_trgm 인덱스 추가.
 -- 벡터 검색 확장 시: CREATE EXTENSION vector; ALTER TABLE meetings ADD COLUMN embedding vector(1024);
+
+-- [기존 DB 마이그레이션] 이미 meetings 테이블이 있는 DB는 위 CREATE 대신 아래만 실행:
+-- CREATE TABLE IF NOT EXISTS users ( id SERIAL PRIMARY KEY, email TEXT NOT NULL UNIQUE,
+--   password_hash TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now() );
+-- ALTER TABLE meetings ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE CASCADE;
+-- (기존 회의록은 user_id가 NULL이라 목록에 안 보임 — 계정 생성 후 원하는 계정에 배정:
+--  UPDATE meetings SET user_id = <내 user id> WHERE user_id IS NULL;)

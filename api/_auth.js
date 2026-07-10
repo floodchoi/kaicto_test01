@@ -1,40 +1,58 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 
-// 공유 비밀번호 방식 로그인. APP_PASSWORD(환경변수)가 곧 비밀번호이자 토큰 서명 키.
-// ponytail: 다중 사용자 계정이 필요해지면 users 테이블 + bcrypt로 교체.
-const SECRET = process.env.APP_PASSWORD ?? "";
+// 이메일/비밀번호 인증. AUTH_SECRET(환경변수)은 토큰 서명 키 — 유출 시 전체 토큰 위조 가능하므로 비밀 유지.
+const SECRET = process.env.AUTH_SECRET ?? "";
 
 const hmac = (s) => createHmac("sha256", SECRET).update(s).digest("base64url");
 
-// 상수시간 비교 (문자열 길이 차이로 새는 것 방지 위해 해시끼리 비교)
+// 비밀번호 해시: scrypt (Node 내장 — 외부 의존성 불필요). 저장 형식 "salt:hash" (hex)
+export const hashPassword = (pw) => {
+  const salt = randomBytes(16).toString("hex");
+  return `${salt}:${scryptSync(pw, salt, 64).toString("hex")}`;
+};
+
+export const verifyPassword = (pw, stored) => {
+  const [salt, hash] = (stored ?? "").split(":");
+  if (!salt || !hash) return false;
+  const calc = scryptSync(pw, salt, 64);
+  const expect = Buffer.from(hash, "hex");
+  return calc.length === expect.length && timingSafeEqual(calc, expect);
+};
+
+// 로그인 실패(미가입 이메일) 시에도 해시 검증 시간을 유사하게 유지하기 위한 더미
+export const DUMMY_HASH = hashPassword("dummy-password-for-timing");
+
+// 무상태 토큰: "<userId>.<만료ms>.<서명>" — DB 조회 없이 검증
+export const issueToken = (userId) => {
+  const exp = Date.now() + 30 * 24 * 60 * 60 * 1000; // 30일
+  return `${userId}.${exp}.${hmac(`${userId}.${exp}`)}`;
+};
+
+// 상수시간 문자열 비교 (해시로 길이 정규화)
 const safeEqual = (a, b) => {
   const ba = Buffer.from(hmac("cmp:" + a));
   const bb = Buffer.from(hmac("cmp:" + b));
-  return ba.length === bb.length && timingSafeEqual(ba, bb);
+  return timingSafeEqual(ba, bb);
 };
 
-export const checkPassword = (pw) => !!SECRET && safeEqual(String(pw ?? ""), SECRET);
-
-// 무상태 토큰: "<만료시각>.<서명>" — DB 없이 검증 가능
-export const issueToken = () => {
-  const exp = Date.now() + 30 * 24 * 60 * 60 * 1000; // 30일
-  return `${exp}.${hmac("tok:" + exp)}`;
-};
-
-// 실패 시 응답까지 보내고 false 반환. 핸들러 첫 줄에서: if (!requireAuth(req,res)) return;
+// 성공 시 userId(number) 반환, 실패 시 401 응답을 보내고 null 반환.
+// 사용: const userId = requireAuth(req, res); if (!userId) return;
 export const requireAuth = (req, res) => {
   if (!SECRET) {
     res.status(500).json({
-      error: "서버에 APP_PASSWORD가 설정되지 않았습니다. Vercel 환경변수(또는 .env)에 추가하세요.",
+      error: "서버에 AUTH_SECRET이 설정되지 않았습니다. Vercel 환경변수(또는 .env)에 추가하세요.",
     });
-    return false;
+    return null;
   }
   const token = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
-  const [expStr, sig] = token.split(".");
+  const [uidStr, expStr, sig] = token.split(".");
+  const uid = Number(uidStr);
   const exp = Number(expStr);
-  if (!(exp > Date.now()) || !sig || !safeEqual(sig, hmac("tok:" + exp))) {
+  const valid =
+    Number.isInteger(uid) && uid > 0 && exp > Date.now() && sig && safeEqual(sig, hmac(`${uidStr}.${expStr}`));
+  if (!valid) {
     res.status(401).json({ error: "로그인이 필요합니다." });
-    return false;
+    return null;
   }
-  return true;
+  return uid;
 };
