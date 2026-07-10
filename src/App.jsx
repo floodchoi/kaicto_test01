@@ -375,9 +375,14 @@ async function summarizeWithGemini(text, apiKey, model) {
 }
 
 async function summarizeWithLocal(text, baseUrl, model) {
-  const url = baseUrl.replace(/\/+$/, "") + "/chat/completions";
+  // 주소 보정: 끝 슬래시 제거 + /v1 누락 시 자동 추가 (Ollama·LM Studio 모두 /v1 사용)
+  let base = baseUrl.replace(/\/+$/, "");
+  if (!/\/v1$/.test(base)) base += "/v1";
+  const url = base + "/chat/completions";
   let res;
   try {
+    // response_format은 서버마다 지원이 갈려서(LM Studio는 json_object 거부) 보내지 않는다.
+    // JSON 형식은 시스템 프롬프트(SUMMARY_JSON_HINT)로 강제하고 코드펜스는 파싱 시 제거.
     res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -385,7 +390,6 @@ async function summarizeWithLocal(text, baseUrl, model) {
         model,
         stream: false,
         temperature: 0.2,
-        response_format: { type: "json_object" },
         messages: [
           { role: "system", content: SUMMARY_SYSTEM + "\n\n" + SUMMARY_JSON_HINT },
           { role: "user", content: text },
@@ -569,6 +573,25 @@ function Settings({ settings, onSave, onClose }) {
     return base.some((m) => m.id === model) ? base : [{ id: model, label: model }, ...base];
   })();
 
+  // 로컬 서버(OpenAI 호환)의 모델 목록 조회 — 모델명 오타 방지
+  const [localModels, setLocalModels] = useState(null);
+  const [localStatus, setLocalStatus] = useState("");
+  const refreshLocalModels = async () => {
+    let base = localBaseUrl.trim().replace(/\/+$/, "");
+    if (!/\/v1$/.test(base)) base += "/v1";
+    setLocalStatus("조회 중…");
+    try {
+      const r = await fetch(base + "/models");
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const list = ((await r.json()).data ?? []).map((m) => m.id);
+      setLocalModels(list);
+      setLocalStatus(list.length ? `사용 가능 모델 ${list.length}개` : "로드된 모델이 없습니다.");
+    } catch (e) {
+      setLocalModels(null);
+      setLocalStatus(`조회 실패 (${e.message}) — 서버 주소·실행 여부·CORS를 확인하세요.`);
+    }
+  };
+
   const save = () => {
     const next = {
       apiKey: apiKey.trim(),
@@ -648,10 +671,23 @@ function Settings({ settings, onSave, onClose }) {
             <>
               <label className="mt-4 block text-sm font-medium text-slate-700">로컬 서버 주소 (OpenAI 호환)</label>
               <input value={localBaseUrl} onChange={(e) => setLocalBaseUrl(e.target.value)}
-                placeholder="http://localhost:11434/v1" className={INPUT_CLS} />
+                placeholder="Ollama: http://localhost:11434/v1 · LM Studio: http://localhost:1234/v1" className={INPUT_CLS} />
+
+              {/* 로컬 서버의 모델 목록 조회 — 모델명 오타 방지 */}
+              <div className="mt-2 flex items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2">
+                <span className="text-xs text-slate-500">{localStatus || "서버의 모델 목록을 불러올 수 있습니다."}</span>
+                <button type="button" onClick={refreshLocalModels}
+                  className="shrink-0 text-xs font-medium text-teal-700 hover:underline">
+                  🔄 로컬 모델 불러오기
+                </button>
+              </div>
+
               <label className="mt-4 block text-sm font-medium text-slate-700">로컬 모델명</label>
-              <input value={localModel} onChange={(e) => setLocalModel(e.target.value)}
-                placeholder="예: llama3.1, qwen2.5" className={INPUT_CLS} />
+              <input list="local-models" value={localModel} onChange={(e) => setLocalModel(e.target.value)}
+                placeholder="예: google/gemma-4-12b, llama3.1" className={INPUT_CLS} />
+              <datalist id="local-models">
+                {(localModels ?? []).map((id) => <option key={id} value={id} />)}
+              </datalist>
               <p className="mt-1 text-xs text-slate-400">
                 Ollama·LM Studio 등. 브라우저와 같은 PC에서 실행 중이어야 하고, 서버에 CORS 허용이 필요합니다.
               </p>
