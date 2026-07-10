@@ -56,13 +56,29 @@ const mimeFor = (file) =>
 const geminiErr = async (res) =>
   (await res.json().catch(() => ({}))).error?.message ?? `Gemini ${res.status}`;
 
+// Gemini fetch 래퍼: 네트워크 오류("Failed to fetch")를 1회 재시도하고,
+// 그래도 실패하면 어느 단계였는지 + 흔한 원인을 담아 보고한다.
+async function gfetch(url, opts, what) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fetch(url, opts);
+    } catch (e) {
+      if (attempt >= 1)
+        throw new Error(
+          `${what} 중 네트워크 오류 (${e.message}). 인터넷 연결 상태와, 광고차단기·보안 프로그램이 googleapis.com을 차단하고 있지 않은지 확인한 뒤 다시 시도해주세요.`,
+        );
+      await new Promise((r) => setTimeout(r, 1500)); // 일시적 끊김 대비 재시도
+    }
+  }
+}
+
 // 재개형(resumable) 업로드: start(세션 생성) → 바이트 업로드+finalize → ACTIVE 될 때까지 폴링.
 async function uploadAudioToGemini(file, apiKey, onStage) {
   const mimeType = mimeFor(file);
   const base = "https://generativelanguage.googleapis.com";
 
   onStage?.("업로드 준비 중…");
-  const start = await fetch(`${base}/upload/v1beta/files`, {
+  const start = await gfetch(`${base}/upload/v1beta/files`, {
     method: "POST",
     headers: {
       "x-goog-api-key": apiKey,
@@ -73,18 +89,18 @@ async function uploadAudioToGemini(file, apiKey, onStage) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ file: { display_name: file.name } }),
-  });
+  }, "업로드 준비");
   if (!start.ok) throw new Error(await geminiErr(start));
   const uploadUrl = start.headers.get("x-goog-upload-url");
   if (!uploadUrl) throw new Error("업로드 URL을 받지 못했습니다.");
 
   onStage?.("업로드 중…");
-  const up = await fetch(uploadUrl, {
+  const up = await gfetch(uploadUrl, {
     method: "POST",
     // Content-Length는 브라우저가 File 크기로 자동 설정 (수동 지정은 무시됨)
     headers: { "X-Goog-Upload-Offset": "0", "X-Goog-Upload-Command": "upload, finalize" },
     body: file,
-  });
+  }, "오디오 업로드");
   if (!up.ok) throw new Error(await geminiErr(up));
   let meta = (await up.json()).file;
 
@@ -92,7 +108,7 @@ async function uploadAudioToGemini(file, apiKey, onStage) {
   for (let i = 0; meta.state === "PROCESSING" && i < 60; i++) {
     onStage?.("오디오 처리 중…");
     await new Promise((r) => setTimeout(r, 1500));
-    const poll = await fetch(`${base}/v1beta/${meta.name}`, { headers: { "x-goog-api-key": apiKey } });
+    const poll = await gfetch(`${base}/v1beta/${meta.name}`, { headers: { "x-goog-api-key": apiKey } }, "오디오 처리 확인");
     if (!poll.ok) throw new Error(await geminiErr(poll));
     meta = await poll.json();
   }
@@ -167,7 +183,7 @@ async function splitAudioToWavChunks(file) {
 
 // 전사도 브라우저에서 직접 Gemini 호출. 스트리밍(SSE)으로 받아 조각마다 onDelta 콜백.
 async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, prompt = TRANSCRIBE_PROMPT) {
-  const res = await fetch(
+  const res = await gfetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`,
     {
       method: "POST",
@@ -176,6 +192,7 @@ async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, p
         contents: [{ parts: [{ text: prompt }, { fileData: { mimeType, fileUri } }] }],
       }),
     },
+    "전사 요청",
   );
   if (!res.ok) throw new Error("전사 실패: " + (await geminiErr(res)));
 
@@ -186,7 +203,15 @@ async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, p
   let finishReason = "";
   let note = "";
   while (true) {
-    const { done, value } = await reader.read();
+    let done, value;
+    try {
+      ({ done, value } = await reader.read());
+    } catch (e) {
+      // 스트리밍 수신 도중 네트워크 끊김
+      throw new Error(
+        `전사 수신이 중단되었습니다 (${e.message}). 네트워크 연결을 확인하고 다시 시도해주세요.`,
+      );
+    }
     if (done) break;
     buffer += decoder.decode(value, { stream: true }); // stream:true → 한글 멀티바이트가 청크 경계서 안 깨지게
     // SSE를 줄 단위로 파싱 (\n·\r\n·\r 모두 대응). 각 이벤트는 한 줄 "data: {json}".
@@ -225,7 +250,7 @@ async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, p
 
 // 전사 완료 후 제목 자동 추천 (짧은 단발 호출 — 실패해도 전사 결과엔 영향 없음)
 async function suggestTitle(text, apiKey, model) {
-  const res = await fetch(
+  const res = await gfetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
     {
       method: "POST",
@@ -242,6 +267,7 @@ async function suggestTitle(text, apiKey, model) {
         ],
       }),
     },
+    "제목 추천",
   );
   if (!res.ok) throw new Error(await geminiErr(res));
   const t = (await res.json()).candidates?.[0]?.content?.parts?.[0]?.text?.trim();
@@ -299,7 +325,7 @@ const stripFences = (s) =>
   s.replace(/^\s*```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
 
 async function summarizeWithGemini(text, apiKey, model) {
-  const res = await fetch(
+  const res = await gfetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
     {
       method: "POST",
@@ -310,6 +336,7 @@ async function summarizeWithGemini(text, apiKey, model) {
         generationConfig: { responseMimeType: "application/json", responseSchema: SUMMARY_GEMINI_SCHEMA },
       }),
     },
+    "AI 요약",
   );
   if (!res.ok) throw new Error("요약 실패: " + (await geminiErr(res)));
   const raw = (await res.json()).candidates?.[0]?.content?.parts?.[0]?.text;
