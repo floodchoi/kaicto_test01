@@ -3,6 +3,11 @@ import { useEffect, useRef, useState } from "react";
 const fmtDate = (d) =>
   new Date(d).toLocaleDateString("ko-KR", { year: "numeric", month: "short", day: "numeric" });
 
+const fmtDateTime = (d) =>
+  new Date(d).toLocaleString("ko-KR", {
+    year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+  });
+
 // 선택 가능한 Gemini 모델
 const MODELS = [
   { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash — 빠르고 저렴 (권장)" },
@@ -1044,10 +1049,142 @@ function SummaryPreview({ data }) {
   );
 }
 
+/* ── 회의록 수정 (소유자 전용) ─────────────────────────────── */
+function EditMeeting({ m, onSaved, onCancel }) {
+  const [title, setTitle] = useState(m.title);
+  const [text, setText] = useState(m.raw_text);
+  const [summaryText, setSummaryText] = useState((m.summary ?? []).join("\n"));
+  const [agenda, setAgenda] = useState(m.agenda ?? []);
+  const [items, setItems] = useState(m.action_items ?? []);
+  const [tagsText, setTagsText] = useState((m.tags ?? []).join(", "));
+  const [visibility, setVisibility] = useState(m.visibility ?? "private");
+  const [showRaw, setShowRaw] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const setAgendaAt = (i, patch) =>
+    setAgenda((p) => p.map((a, j) => (j === i ? { ...a, ...patch } : a)));
+  const setItemAt = (i, patch) =>
+    setItems((p) => p.map((a, j) => (j === i ? { ...a, ...patch } : a)));
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const updated = await api(`/api/meetings/${m.id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          title,
+          text,
+          summary: summaryText.split("\n").map((s) => s.trim()).filter(Boolean),
+          agenda: agenda.filter((a) => (a.topic ?? "").trim() || (a.discussion ?? "").trim()),
+          tags: tagsText.split(",").map((s) => s.trim()).filter(Boolean),
+          visibility,
+          action_items: items.filter((i) => (i.task ?? "").trim()),
+        }),
+      });
+      onSaved(updated);
+    } catch (e) {
+      setError(e.message);
+      setSaving(false);
+    }
+  };
+
+  const box = "w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100";
+
+  return (
+    <div className="space-y-5">
+      <button onClick={onCancel} className="text-sm font-medium text-teal-700 hover:underline">
+        ← 수정 취소
+      </button>
+
+      <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="회의 제목"
+        className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-lg font-semibold shadow-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100" />
+
+      <section className="space-y-2 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-400">3줄 요약 (줄바꿈 = 항목)</h3>
+        <textarea value={summaryText} onChange={(e) => setSummaryText(e.target.value)} rows={3} className={box} />
+      </section>
+
+      <section className="space-y-3 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-400">주요 아젠다</h3>
+        {agenda.map((a, i) => (
+          <div key={i} className="space-y-1.5 border-l-2 border-teal-300 pl-3">
+            <div className="flex gap-2">
+              <input value={a.topic ?? ""} onChange={(e) => setAgendaAt(i, { topic: e.target.value })}
+                placeholder="주제" className={box + " font-semibold"} />
+              <button onClick={() => setAgenda((p) => p.filter((_, j) => j !== i))}
+                title="아젠다 삭제" className="shrink-0 text-slate-400 hover:text-red-500">✕</button>
+            </div>
+            <textarea value={a.discussion ?? ""} onChange={(e) => setAgendaAt(i, { discussion: e.target.value })}
+              placeholder="논의 내용" rows={2} className={box} />
+          </div>
+        ))}
+        <button onClick={() => setAgenda((p) => [...p, { topic: "", discussion: "" }])}
+          className="text-sm font-medium text-teal-700 hover:underline">+ 아젠다 추가</button>
+      </section>
+
+      <section className="space-y-2 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-400">액션 아이템</h3>
+        {items.map((a, i) => (
+          <div key={i} className="flex flex-wrap items-center gap-2">
+            <input type="checkbox" checked={!!a.done} onChange={(e) => setItemAt(i, { done: e.target.checked })}
+              className="size-4 accent-teal-700" title="완료 여부" />
+            <input value={a.task ?? ""} onChange={(e) => setItemAt(i, { task: e.target.value })}
+              placeholder="할 일" className={box + " min-w-40 flex-1"} />
+            <input value={a.assignee ?? ""} onChange={(e) => setItemAt(i, { assignee: e.target.value || null })}
+              placeholder="담당자" className={box + " w-28"} />
+            <input value={a.due_date ?? ""} onChange={(e) => setItemAt(i, { due_date: e.target.value || null })}
+              placeholder="기한" className={box + " w-28"} />
+            <button onClick={() => setItems((p) => p.filter((_, j) => j !== i))}
+              title="항목 삭제" className="text-slate-400 hover:text-red-500">✕</button>
+          </div>
+        ))}
+        <button onClick={() => setItems((p) => [...p, { task: "", assignee: null, due_date: null, done: false }])}
+          className="text-sm font-medium text-teal-700 hover:underline">+ 액션 아이템 추가</button>
+      </section>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <input value={tagsText} onChange={(e) => setTagsText(e.target.value)}
+          placeholder="태그 (쉼표로 구분)" className={box + " min-w-40 flex-1"} />
+        <select value={visibility} onChange={(e) => setVisibility(e.target.value)}
+          className="rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm outline-none focus:border-teal-500">
+          <option value="private">🔒 나만 보기</option>
+          <option value="workspace">👥 전체 공개</option>
+        </select>
+      </div>
+
+      <section>
+        <button onClick={() => setShowRaw(!showRaw)} className="text-sm font-medium text-slate-500 hover:text-slate-700">
+          {showRaw ? "▾ 원문 접기" : "▸ 회의 원문 수정"}
+        </button>
+        {showRaw && (
+          <textarea value={text} onChange={(e) => setText(e.target.value)} rows={12}
+            className={box + " mt-3 leading-relaxed"} />
+        )}
+      </section>
+
+      {error && <p className="rounded-lg bg-red-50 px-4 py-2 text-sm text-red-600">⚠️ {error}</p>}
+
+      <div className="flex justify-end gap-3">
+        <button onClick={onCancel} disabled={saving}
+          className="rounded-xl px-4 py-2.5 text-sm font-medium text-slate-500 hover:bg-slate-100 disabled:opacity-40">
+          취소
+        </button>
+        <button onClick={save} disabled={saving || !title.trim() || !text.trim()}
+          className="rounded-xl bg-teal-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-teal-600 disabled:opacity-40">
+          {saving ? "저장 중…" : "수정 저장"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* ── 회의록 상세: 요약 / 아젠다 / 액션 아이템 ─────────────── */
 function Detail({ id, onBack }) {
   const [m, setM] = useState(null);
   const [showRaw, setShowRaw] = useState(false);
+  const [editing, setEditing] = useState(false);
 
   useEffect(() => {
     api(`/api/meetings/${id}`).then(setM).catch(console.error);
@@ -1067,11 +1204,30 @@ function Detail({ id, onBack }) {
 
   if (!m) return <p className="py-16 text-center text-sm text-slate-400">불러오는 중…</p>;
 
+  if (editing)
+    return (
+      <EditMeeting
+        m={m}
+        onSaved={(updated) => { setM(updated); setEditing(false); }}
+        onCancel={() => setEditing(false)}
+      />
+    );
+
   return (
     <div className="space-y-6">
-      <button onClick={onBack} className="text-sm font-medium text-teal-700 hover:underline">
-        ← 목록으로
-      </button>
+      <div className="flex items-center justify-between">
+        <button onClick={onBack} className="text-sm font-medium text-teal-700 hover:underline">
+          ← 목록으로
+        </button>
+        {m.is_owner && (
+          <button
+            onClick={() => setEditing(true)}
+            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
+          >
+            ✏️ 수정
+          </button>
+        )}
+      </div>
 
       <div>
         <h2 className="text-2xl font-bold text-slate-800">{m.title}</h2>
@@ -1084,6 +1240,12 @@ function Detail({ id, onBack }) {
           )}
           {m.tags?.map((t) => <Tag key={t}>{t}</Tag>)}
         </div>
+        {m.updated_at && (
+          <p className="mt-1.5 text-xs text-slate-400">
+            최종 수정: {fmtDateTime(m.updated_at)}
+            {m.updated_by_email ? ` · ${m.updated_by_email}` : ""}
+          </p>
+        )}
       </div>
 
       <section className="rounded-2xl bg-slate-900 p-6 text-slate-100 shadow-sm">

@@ -12,13 +12,55 @@ export default wrap(async function handler(req, res) {
   if (req.method === "GET") {
     // 본인 것 또는 전체 공개(workspace)만 열람 가능
     const [meeting] = await sql`
-      SELECT m.*, (m.user_id = ${userId}) AS is_owner, u.email AS owner_email
-      FROM meetings m LEFT JOIN users u ON u.id = m.user_id
+      SELECT m.*, (m.user_id = ${userId}) AS is_owner,
+             u.email AS owner_email, u2.email AS updated_by_email
+      FROM meetings m
+      LEFT JOIN users u  ON u.id  = m.user_id
+      LEFT JOIN users u2 ON u2.id = m.updated_by
       WHERE m.id = ${id} AND (m.user_id = ${userId} OR m.visibility = 'workspace')`;
     if (!meeting) return res.status(404).json({ error: "not found" });
     const items = await sql`
       SELECT * FROM action_items WHERE meeting_id = ${id} ORDER BY id`;
     return res.status(200).json({ ...meeting, action_items: items });
+  }
+
+  // 회의록 수정 — 소유자만. 액션 아이템은 전체 교체(삭제 후 재삽입, done 상태 포함).
+  if (req.method === "PUT") {
+    const { title, text, summary, agenda, tags, visibility, action_items } = req.body ?? {};
+    if (!title?.trim() || !text?.trim())
+      return res.status(400).json({ error: "title과 text는 필수입니다." });
+    if (title.length > 300) return res.status(400).json({ error: "제목이 너무 깁니다 (최대 300자)." });
+    if (text.length > 1_000_000) return res.status(400).json({ error: "본문이 너무 깁니다 (최대 100만 자)." });
+    if ((action_items?.length ?? 0) > 100) return res.status(400).json({ error: "액션 아이템이 너무 많습니다." });
+    const vis = visibility === "workspace" ? "workspace" : "private";
+
+    const [meeting] = await sql`
+      UPDATE meetings SET
+        title = ${title}, raw_text = ${text}, summary = ${summary ?? []},
+        agenda = ${sql.json(agenda ?? [])}, tags = ${tags ?? []}, visibility = ${vis},
+        updated_at = now(), updated_by = ${userId}
+      WHERE id = ${id} AND user_id = ${userId}
+      RETURNING *`;
+    if (!meeting) return res.status(404).json({ error: "not found" });
+
+    await sql`DELETE FROM action_items WHERE meeting_id = ${id}`;
+    const items = [];
+    for (const it of action_items ?? []) {
+      const [row] = await sql`
+        INSERT INTO action_items (meeting_id, task, assignee, due_date, done)
+        VALUES (${id}, ${it.task}, ${it.assignee ?? null}, ${it.due_date ?? null}, ${!!it.done})
+        RETURNING *`;
+      items.push(row);
+    }
+
+    const [me] = await sql`SELECT email FROM users WHERE id = ${userId}`;
+    return res.status(200).json({
+      ...meeting,
+      action_items: items,
+      is_owner: true,
+      owner_email: me?.email ?? null,
+      updated_by_email: me?.email ?? null,
+    });
   }
 
   if (req.method === "PATCH") {
@@ -33,5 +75,5 @@ export default wrap(async function handler(req, res) {
     return res.status(200).json(row);
   }
 
-  res.status(405).json({ error: "GET/PATCH only" });
+  res.status(405).json({ error: "GET/PUT/PATCH only" });
 });

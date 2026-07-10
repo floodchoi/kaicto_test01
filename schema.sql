@@ -17,7 +17,9 @@ CREATE TABLE meetings (
   summary    TEXT[] NOT NULL DEFAULT '{}',  -- 3줄 요약
   agenda     JSONB  NOT NULL DEFAULT '[]',  -- [{"topic": "...", "discussion": "..."}]
   tags       TEXT[] NOT NULL DEFAULT '{}',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ,                        -- 최종 수정 시각 (수정된 적 없으면 NULL)
+  updated_by INT REFERENCES users(id)            -- 최종 수정 계정
 );
 
 CREATE TABLE action_items (
@@ -37,5 +39,7 @@ CREATE TABLE action_items (
 --   password_hash TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now() );
 -- ALTER TABLE meetings ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE CASCADE;
 -- ALTER TABLE meetings ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'private';
+-- ALTER TABLE meetings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ,
+--   ADD COLUMN IF NOT EXISTS updated_by INT REFERENCES users(id);
 -- (기존 회의록은 user_id가 NULL이라 목록에 안 보임 — 계정 생성 후 원하는 계정에 배정:
 --  UPDATE meetings SET user_id = <내 user id> WHERE user_id IS NULL;)
