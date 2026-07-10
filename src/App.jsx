@@ -87,8 +87,12 @@ async function uploadAudioToGemini(file, apiKey, onStage) {
   return { fileUri: meta.uri, mimeType };
 }
 
-const TRANSCRIBE_PROMPT =
-  "이 오디오는 회의 녹음이다. 말하는 사람이 쓴 언어(한국어·영어 등) 그대로 정확히 전사해라. 다른 언어로 번역하지 말고, 요약·생략 없이 들리는 그대로 받아써라. 한국어와 영어가 섞여 있으면 섞인 그대로 표기해라. 화자가 구분되면 '화자1:', '화자2:'처럼 표기해라.";
+const TRANSCRIBE_PROMPT = `이 오디오는 회의 녹음이다. 요약·생략 없이 들리는 그대로 정확히 전사해라.
+- 한국어로 말한 부분은 한국어 그대로 전사한다.
+- 영어로 말한 부분은 영어 원문을 그대로 전사한 뒤, 바로 다음 줄에 자연스러운 한국어 번역을 함께 제공한다. 형식:
+EN: <영어 원문>
+KO: <한국어 번역>
+화자가 구분되면 '화자1:', '화자2:'처럼 표기해라.`;
 
 // 전사도 브라우저에서 직접 Gemini 호출. 스트리밍(SSE)으로 받아 조각마다 onDelta 콜백.
 async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta) {
