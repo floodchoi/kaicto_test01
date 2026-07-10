@@ -376,6 +376,13 @@ function Login({ onLogin }) {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  // 봇 방지: 가입 모드 진입 시 서버 챌린지 발급(최소 3초 뒤 제출 가능) + 허니팟 필드
+  const [challenge, setChallenge] = useState(null);
+  const [website, setWebsite] = useState(""); // 허니팟 — 사람은 볼 수 없음, 채워지면 봇
+
+  useEffect(() => {
+    if (mode === "signup") api("/api/auth").then((d) => setChallenge(d.challenge)).catch(() => {});
+  }, [mode]);
 
   const submit = async (e) => {
     e.preventDefault();
@@ -384,7 +391,7 @@ function Login({ onLogin }) {
     try {
       const { token, email: savedEmail } = await api("/api/auth", {
         method: "POST",
-        body: JSON.stringify({ action: mode, email, password }),
+        body: JSON.stringify({ action: mode, email, password, challenge, website }),
       });
       localStorage.setItem("auth_token", token);
       localStorage.setItem("auth_email", savedEmail);
@@ -427,6 +434,18 @@ function Login({ onLogin }) {
           placeholder={isSignup ? "8자 이상" : "비밀번호"}
           autoComplete={isSignup ? "new-password" : "current-password"}
           className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+        />
+
+        {/* 허니팟 (봇 방지) — 화면에 보이지 않는 필드. 자동 프로그램이 채우면 가입 거부 */}
+        <input
+          type="text"
+          name="website"
+          value={website}
+          onChange={(e) => setWebsite(e.target.value)}
+          className="hidden"
+          tabIndex={-1}
+          autoComplete="off"
+          aria-hidden="true"
         />
 
         {error && <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">⚠️ {error}</p>}
@@ -577,28 +596,88 @@ function Settings({ settings, onSave, onClose }) {
   );
 }
 
-/* ── 대시보드: 회의록 리스트 + 검색 ───────────────────────── */
-function Dashboard({ onOpen, onNew }) {
+/* ── 전사 진행 패널: 새 회의록·목록 어디서든 진행 상황 표시 ── */
+function TransPanel({ trans, onGoto, onDismiss }) {
+  const liveRef = useRef(null);
+  useEffect(() => {
+    const el = liveRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [trans.liveText]);
+
+  if (trans.status === "idle") return null;
+  return (
+    <div className="rounded-xl border border-teal-200 bg-teal-50/40 p-4">
+      <div className="flex flex-wrap items-center gap-2 text-xs font-semibold">
+        {trans.status === "running" && (
+          <>
+            <span className="inline-block size-2 animate-pulse rounded-full bg-teal-500" />
+            <span className="text-teal-700">🎙️ {trans.fileName} — {trans.stage || "전사 중…"}</span>
+          </>
+        )}
+        {trans.status === "done" && (
+          <span className="text-teal-700">✅ {trans.fileName} 전사 완료 — 새 회의록 입력란에 채워졌습니다.</span>
+        )}
+        {trans.status === "error" && <span className="text-red-600">⚠️ 전사 실패: {trans.error}</span>}
+        <span className="ml-auto flex items-center gap-3">
+          {onGoto && (
+            <button onClick={onGoto} className="font-medium text-teal-700 hover:underline">
+              새 회의록으로 →
+            </button>
+          )}
+          {trans.status !== "running" && onDismiss && (
+            <button onClick={onDismiss} title="닫기" className="text-slate-400 hover:text-slate-600">✕</button>
+          )}
+        </span>
+      </div>
+      {trans.status === "running" && trans.liveText && (
+        <pre
+          ref={liveRef}
+          className="mt-2 max-h-52 overflow-y-auto whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-700"
+        >
+          {trans.liveText}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+/* ── 대시보드: 회의록 리스트 + 검색(키워드·날짜 범위) ─────── */
+function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans }) {
   const [meetings, setMeetings] = useState(null);
   const [q, setQ] = useState("");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
 
   useEffect(() => {
     const t = setTimeout(
-      () => api(`/api/meetings?q=${encodeURIComponent(q)}`).then(setMeetings).catch(console.error),
+      () =>
+        api(`/api/meetings?q=${encodeURIComponent(q)}&from=${from}&to=${to}`)
+          .then(setMeetings)
+          .catch(console.error),
       q ? 300 : 0,
     );
     return () => clearTimeout(t);
-  }, [q]);
+  }, [q, from, to]);
+
+  const hasFilter = q || from || to;
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-3">
+      {/* 백그라운드 전사 진행 카드 — 목록에 있어도 진행 상황이 보임 */}
+      <TransPanel trans={trans} onGoto={onGotoNew} onDismiss={onDismissTrans} />
+
+      <div className="flex flex-wrap items-center gap-2">
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="제목, 내용, 태그로 검색…"
-          className="flex-1 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm shadow-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+          className="min-w-40 flex-1 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm shadow-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
         />
+        <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} title="시작일"
+          className="rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-600 shadow-sm outline-none focus:border-teal-500" />
+        <span className="text-slate-400">~</span>
+        <input type="date" value={to} onChange={(e) => setTo(e.target.value)} title="종료일"
+          className="rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-600 shadow-sm outline-none focus:border-teal-500" />
         <button
           onClick={onNew}
           className="rounded-xl bg-teal-700 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-teal-600"
@@ -611,8 +690,8 @@ function Dashboard({ onOpen, onNew }) {
         <p className="py-16 text-center text-sm text-slate-400">불러오는 중…</p>
       ) : meetings.length === 0 ? (
         <div className="rounded-2xl border border-dashed border-slate-300 py-16 text-center">
-          <p className="text-slate-500">{q ? "검색 결과가 없습니다." : "아직 회의록이 없습니다."}</p>
-          {!q && (
+          <p className="text-slate-500">{hasFilter ? "검색 결과가 없습니다." : "아직 회의록이 없습니다."}</p>
+          {!hasFilter && (
             <button onClick={onNew} className="mt-3 text-sm font-medium text-teal-700 hover:underline">
               첫 회의록 작성하기 →
             </button>
@@ -632,6 +711,11 @@ function Dashboard({ onOpen, onNew }) {
                 </div>
                 <p className="mt-2 line-clamp-2 text-sm text-slate-500">{m.summary?.[0]}</p>
                 <div className="mt-3 flex flex-wrap gap-1.5">
+                  {m.visibility === "workspace" && (
+                    <span className="rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-700">
+                      👥 공개{!m.is_owner && m.owner_email ? ` · ${m.owner_email}` : ""}
+                    </span>
+                  )}
                   {m.tags?.map((t) => <Tag key={t}>{t}</Tag>)}
                 </div>
               </button>
@@ -643,103 +727,98 @@ function Dashboard({ onOpen, onNew }) {
   );
 }
 
-/* ── 새 회의록: 텍스트 입력 + 오디오 업로드(목업) ─────────── */
-function NewMeeting({ settings, onDone, onCancel, onOpenSettings }) {
-  const [title, setTitle] = useState("");
-  const [text, setText] = useState("");
-  const [audioFile, setAudioFile] = useState(null);
-  const [transcribing, setTranscribing] = useState(false);
-  const [stage, setStage] = useState("");
-  const [liveText, setLiveText] = useState(""); // 전사 실시간 진행 텍스트
-  const liveRef = useRef(null);
+/* ── 액션 아이템: 전체 목록 + 검색(키워드·날짜 범위) ───────── */
+function ActionItems({ onOpenMeeting }) {
+  const [items, setItems] = useState(null);
+  const [q, setQ] = useState("");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
 
-  // 새 조각이 들어올 때마다 진행창을 맨 아래로 스크롤
   useEffect(() => {
-    const el = liveRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [liveText]);
+    const t = setTimeout(
+      () =>
+        api(`/api/action-items?q=${encodeURIComponent(q)}&from=${from}&to=${to}`)
+          .then(setItems)
+          .catch(console.error),
+      q ? 300 : 0,
+    );
+    return () => clearTimeout(t);
+  }, [q, from, to]);
+
+  const toggle = async (item) => {
+    setItems((p) => p.map((a) => (a.id === item.id ? { ...a, done: !a.done } : a)));
+    await api(`/api/meetings/${item.meeting_id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ actionItemId: item.id, done: !item.done }),
+    });
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="할 일, 담당자, 회의 제목으로 검색…"
+          className="min-w-40 flex-1 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm shadow-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+        />
+        <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} title="시작일"
+          className="rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-600 shadow-sm outline-none focus:border-teal-500" />
+        <span className="text-slate-400">~</span>
+        <input type="date" value={to} onChange={(e) => setTo(e.target.value)} title="종료일"
+          className="rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-600 shadow-sm outline-none focus:border-teal-500" />
+      </div>
+
+      {items === null ? (
+        <p className="py-16 text-center text-sm text-slate-400">불러오는 중…</p>
+      ) : items.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-slate-300 py-16 text-center">
+          <p className="text-slate-500">
+            {q || from || to ? "검색 결과가 없습니다." : "액션 아이템이 없습니다."}
+          </p>
+        </div>
+      ) : (
+        <ul className="space-y-2">
+          {items.map((a) => (
+            <li key={a.id} className="rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+              <label className="flex cursor-pointer items-start gap-3">
+                <input type="checkbox" checked={a.done} onChange={() => toggle(a)}
+                  className="mt-0.5 size-4 accent-teal-700" />
+                <div className="min-w-0 flex-1">
+                  <p className={`text-sm ${a.done ? "text-slate-400 line-through" : "text-slate-700"}`}>
+                    {a.task}
+                  </p>
+                  <p className="mt-0.5 text-xs text-slate-400">
+                    {a.assignee && <span className="mr-3">👤 {a.assignee}</span>}
+                    {a.due_date && <span>📅 {a.due_date}</span>}
+                  </p>
+                </div>
+              </label>
+              <button
+                onClick={() => onOpenMeeting(a.meeting_id)}
+                className="ml-7 mt-1 text-xs text-teal-700 hover:underline"
+              >
+                📝 {a.meeting_title} · {fmtDate(a.meeting_date)}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/* ── 새 회의록: 텍스트 입력 + 오디오 전사 (전사 상태는 App이 보유 → 화면 이동해도 계속) ── */
+function NewMeeting({ settings, draft, setDraft, trans, onTranscribe, onDismissTrans, onDone, onCancel, onOpenSettings }) {
+  const { title, text } = draft;
+  const setTitle = (v) => setDraft((p) => ({ ...p, title: v }));
+  const setText = (v) => setDraft((p) => ({ ...p, text: v }));
+  const [audioFile, setAudioFile] = useState(null);
+  const [visibility, setVisibility] = useState("private");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [preview, setPreview] = useState(null); // AI 요약 결과 (아직 미저장)
   const [error, setError] = useState(null);
-
-  // 오디오 → 텍스트 (Gemini 멀티모달 전사). 결과를 입력란에 채운다.
-  const transcribe = async () => {
-    // 전사 전용 키/모델이 있으면 그걸, 없으면 요약용으로 폴백
-    const sttKey = settings.sttApiKey || settings.apiKey;
-    const sttModel = settings.sttModel || settings.model;
-    if (!sttKey) {
-      setError("먼저 설정에서 Gemini API 키를 입력해주세요.");
-      return;
-    }
-    if (!/^gemini-[a-z0-9.-]+$/.test(sttModel)) {
-      setError("전사용 모델 ID 형식이 올바르지 않습니다 (예: gemini-2.5-flash).");
-      return;
-    }
-    if (audioFile.size > MAX_AUDIO_BYTES) {
-      setError("오디오가 너무 큽니다 (최대 100MB). 더 짧은 파일을 사용하거나 잘라서 올려주세요.");
-      return;
-    }
-    setTranscribing(true);
-    setError(null);
-    setLiveText("");
-    try {
-      // 긴 파일은 5분 조각으로 분할 → 조각마다 전사 결과가 도착 (준실시간 체감)
-      let chunks = null;
-      try {
-        setStage("오디오 분석 중…");
-        chunks = await splitAudioToWavChunks(audioFile);
-      } catch {
-        chunks = null; // 디코딩 실패(특이 코덱 등) → 통짜 전사로 폴백
-      }
-
-      let acc = "";
-      if (chunks) {
-        for (let i = 0; i < chunks.length; i++) {
-          const label = `조각 ${i + 1}/${chunks.length}`;
-          const { fileUri, mimeType } = await uploadAudioToGemini(chunks[i], sttKey, (s) =>
-            setStage(`${label} · ${s}`),
-          );
-          setStage(`${label} · 전사 중…`);
-          const prevTail = acc.slice(-200).trim();
-          const t = await transcribeWithGemini(
-            fileUri, mimeType, sttKey, sttModel,
-            (delta) => setLiveText((prev) => prev + delta),
-            prevTail ? contPrompt(prevTail) : TRANSCRIBE_PROMPT,
-          );
-          acc = acc ? acc.trimEnd() + "\n" + t.trim() : t.trim();
-          setLiveText(acc + "\n");
-        }
-      } else {
-        // 짧은 파일(또는 분할 실패): 원본 그대로 통짜 전사
-        const { fileUri, mimeType } = await uploadAudioToGemini(audioFile, sttKey, setStage);
-        setStage("전사 중…");
-        acc = await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, (delta) =>
-          setLiveText((prev) => prev + delta),
-        );
-      }
-
-      // 완료 → 전체 텍스트를 입력란으로 이동
-      setText((prev) => (prev.trim() ? prev.trimEnd() + "\n\n" + acc : acc));
-
-      // 제목이 비어 있으면 전사문으로 자동 추천 (실패해도 무시 — 부가 기능)
-      if (!title.trim()) {
-        try {
-          setStage("제목 추천 중…");
-          const suggested = await suggestTitle(acc.slice(0, 4000), sttKey, sttModel);
-          setTitle((prev) => (prev.trim() ? prev : suggested)); // 전사 중 사용자가 입력했으면 유지
-        } catch {
-          /* 제목 추천 실패는 조용히 넘어감 */
-        }
-      }
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setTranscribing(false);
-      setStage("");
-      setLiveText("");
-    }
-  };
 
   // 1단계: 요약 (브라우저에서 Gemini 또는 로컬 LLM 호출, DB 저장 안 함)
   const summarize = async () => {
@@ -755,14 +834,14 @@ function NewMeeting({ settings, onDone, onCancel, onOpenSettings }) {
     }
   };
 
-  // 2단계: 미리보기 확인 후 저장
+  // 2단계: 미리보기 확인 후 저장 (공개 범위 포함)
   const save = async () => {
     setSaving(true);
     setError(null);
     try {
       const meeting = await api("/api/meetings", {
         method: "POST",
-        body: JSON.stringify({ title, text, ...preview }),
+        body: JSON.stringify({ title, text, visibility, ...preview }),
       });
       onDone(meeting.id);
     } catch (e) {
@@ -792,7 +871,7 @@ function NewMeeting({ settings, onDone, onCancel, onOpenSettings }) {
         className="w-full resize-y rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm leading-relaxed shadow-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
       />
 
-      {/* 오디오 업로드 → Gemini 전사 → 위 입력란에 텍스트 채움 */}
+      {/* 오디오 업로드 → Gemini 전사 → 위 입력란에 텍스트 채움 (목록으로 이동해도 계속 진행) */}
       <div className="flex items-center gap-3 rounded-xl border border-dashed border-slate-300 px-4 py-3">
         <label className="flex flex-1 cursor-pointer items-center gap-2 text-sm text-slate-500">
           {/* 일부 브라우저는 audio/* 만으로 .aac를 안 걸러줘서 확장자를 명시 */}
@@ -802,32 +881,17 @@ function NewMeeting({ settings, onDone, onCancel, onOpenSettings }) {
         </label>
         {audioFile && (
           <button
-            onClick={transcribe}
-            disabled={transcribing}
+            onClick={() => onTranscribe(audioFile)}
+            disabled={trans.status === "running"}
             className="shrink-0 rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-700 disabled:opacity-40"
           >
-            {transcribing ? (stage || "변환 중…") : "🔤 텍스트로 변환"}
+            {trans.status === "running" ? "변환 중…" : "🔤 텍스트로 변환"}
           </button>
         )}
       </div>
 
       {/* 전사 실시간 진행창 */}
-      {transcribing && (
-        <div className="rounded-xl border border-teal-200 bg-teal-50/40 p-4">
-          <div className="flex items-center gap-2 text-xs font-semibold text-teal-700">
-            <span className="inline-block size-2 animate-pulse rounded-full bg-teal-500" />
-            {stage || "전사 중…"}
-          </div>
-          {liveText && (
-            <pre
-              ref={liveRef}
-              className="mt-2 max-h-52 overflow-y-auto whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-700"
-            >
-              {liveText}
-            </pre>
-          )}
-        </div>
-      )}
+      <TransPanel trans={trans} onDismiss={onDismissTrans} />
 
       <div className="flex items-center justify-between rounded-xl bg-slate-100 px-4 py-2.5 text-xs text-slate-500">
         <span>
@@ -860,6 +924,20 @@ function NewMeeting({ settings, onDone, onCancel, onOpenSettings }) {
       ) : (
         <div className="space-y-4">
           <SummaryPreview data={preview} />
+
+          {/* 공개 범위: 나만 보기 vs 가입자 전체 공개 */}
+          <div className="flex items-center justify-between rounded-xl bg-slate-100 px-4 py-2.5">
+            <label className="text-sm text-slate-600">공개 범위</label>
+            <select
+              value={visibility}
+              onChange={(e) => setVisibility(e.target.value)}
+              className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-sm outline-none focus:border-teal-500"
+            >
+              <option value="private">🔒 나만 보기</option>
+              <option value="workspace">👥 전체 공개 (가입한 모든 사용자)</option>
+            </select>
+          </div>
+
           <div className="flex justify-end gap-3">
             <button
               onClick={() => setPreview(null)}
@@ -949,6 +1027,7 @@ function Detail({ id, onBack }) {
   }, [id]);
 
   const toggle = async (item) => {
+    if (!m.is_owner) return; // 공개 회의록 열람자는 토글 불가 (서버에서도 차단)
     setM((p) => ({
       ...p,
       action_items: p.action_items.map((a) => (a.id === item.id ? { ...a, done: !a.done } : a)),
@@ -971,6 +1050,11 @@ function Detail({ id, onBack }) {
         <h2 className="text-2xl font-bold text-slate-800">{m.title}</h2>
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <time className="text-sm text-slate-400">{fmtDate(m.created_at)}</time>
+          {m.visibility === "workspace" && (
+            <span className="rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-700">
+              👥 공개{!m.is_owner && m.owner_email ? ` · 작성자 ${m.owner_email}` : ""}
+            </span>
+          )}
           {m.tags?.map((t) => <Tag key={t}>{t}</Tag>)}
         </div>
       </div>
@@ -1008,9 +1092,9 @@ function Detail({ id, onBack }) {
           )}
           {m.action_items.map((a) => (
             <li key={a.id}>
-              <label className="flex cursor-pointer items-start gap-3 rounded-xl px-3 py-2.5 hover:bg-slate-50">
-                <input type="checkbox" checked={a.done} onChange={() => toggle(a)}
-                  className="mt-0.5 size-4 accent-teal-700" />
+              <label className={`flex items-start gap-3 rounded-xl px-3 py-2.5 ${m.is_owner ? "cursor-pointer hover:bg-slate-50" : ""}`}>
+                <input type="checkbox" checked={a.done} onChange={() => toggle(a)} disabled={!m.is_owner}
+                  className="mt-0.5 size-4 accent-teal-700 disabled:opacity-50" />
                 <div className="min-w-0">
                   <p className={`text-sm ${a.done ? "text-slate-400 line-through" : "text-slate-700"}`}>
                     {a.task}
@@ -1041,12 +1125,86 @@ function Detail({ id, onBack }) {
 }
 
 /* ── 앱 셸 ────────────────────────────────────────────────── */
+const IDLE_TRANS = { status: "idle", stage: "", liveText: "", fileName: "", error: null };
+
 export default function App() {
   // ponytail: 라우터 없이 view state로 화면 전환. URL 공유 필요해지면 react-router 도입.
   const [view, setView] = useState({ name: "list" });
   const [settings, setSettings] = useState(loadSettings);
   const [showSettings, setShowSettings] = useState(false);
   const [authed, setAuthed] = useState(() => !!localStorage.getItem("auth_token"));
+  // 작성 중인 초안 + 전사 진행 상태를 App이 보유 → 화면을 이동해도 전사가 계속되고 목록에서도 보임
+  const [draft, setDraft] = useState({ title: "", text: "" });
+  const [trans, setTrans] = useState(IDLE_TRANS);
+
+  // 오디오 → 텍스트 (백그라운드 실행: 어느 화면에 있든 진행)
+  const startTranscription = async (audioFile) => {
+    if (trans.status === "running") return;
+    const sttKey = settings.sttApiKey || settings.apiKey;
+    const sttModel = settings.sttModel || settings.model;
+    const fail = (msg) =>
+      setTrans({ status: "error", stage: "", liveText: "", fileName: audioFile.name, error: msg });
+    if (!sttKey) return fail("먼저 설정에서 Gemini API 키를 입력해주세요.");
+    if (!/^gemini-[a-z0-9.-]+$/.test(sttModel))
+      return fail("전사용 모델 ID 형식이 올바르지 않습니다 (예: gemini-2.5-flash).");
+    if (audioFile.size > MAX_AUDIO_BYTES)
+      return fail("오디오가 너무 큽니다 (최대 100MB). 더 짧은 파일을 사용하거나 잘라서 올려주세요.");
+
+    const setStage = (stage) => setTrans((p) => ({ ...p, stage }));
+    const addDelta = (delta) => setTrans((p) => ({ ...p, liveText: p.liveText + delta }));
+    setTrans({ status: "running", stage: "오디오 분석 중…", liveText: "", fileName: audioFile.name, error: null });
+    try {
+      // 긴 파일은 5분 조각으로 분할 → 조각마다 전사 결과가 도착 (준실시간 체감)
+      let chunks = null;
+      try {
+        chunks = await splitAudioToWavChunks(audioFile);
+      } catch {
+        chunks = null; // 디코딩 실패(특이 코덱 등) → 통짜 전사로 폴백
+      }
+
+      let acc = "";
+      if (chunks) {
+        for (let i = 0; i < chunks.length; i++) {
+          const label = `조각 ${i + 1}/${chunks.length}`;
+          const { fileUri, mimeType } = await uploadAudioToGemini(chunks[i], sttKey, (s) =>
+            setStage(`${label} · ${s}`),
+          );
+          setStage(`${label} · 전사 중…`);
+          const prevTail = acc.slice(-200).trim();
+          const t = await transcribeWithGemini(
+            fileUri, mimeType, sttKey, sttModel, addDelta,
+            prevTail ? contPrompt(prevTail) : TRANSCRIBE_PROMPT,
+          );
+          acc = acc ? acc.trimEnd() + "\n" + t.trim() : t.trim();
+          setTrans((p) => ({ ...p, liveText: acc + "\n" }));
+        }
+      } else {
+        // 짧은 파일(또는 분할 실패): 원본 그대로 통짜 전사
+        const { fileUri, mimeType } = await uploadAudioToGemini(audioFile, sttKey, setStage);
+        setStage("전사 중…");
+        acc = await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, addDelta);
+      }
+
+      // 완료 → 초안 입력란에 채움 (사용자가 어느 화면에 있든)
+      setDraft((prev) => ({
+        ...prev,
+        text: prev.text.trim() ? prev.text.trimEnd() + "\n\n" + acc : acc,
+      }));
+
+      // 제목 자동 추천 — 초안 제목이 비어있을 때만 적용 (실패해도 무시)
+      try {
+        setStage("제목 추천 중…");
+        const suggested = await suggestTitle(acc.slice(0, 4000), sttKey, sttModel);
+        setDraft((prev) => (prev.title.trim() ? prev : { ...prev, title: suggested }));
+      } catch {
+        /* 부가 기능 — 조용히 넘어감 */
+      }
+
+      setTrans({ status: "done", stage: "", liveText: "", fileName: audioFile.name, error: null });
+    } catch (e) {
+      fail(e.message);
+    }
+  };
 
   if (!authed) return <Login onLogin={() => setAuthed(true)} />;
 
@@ -1055,6 +1213,13 @@ export default function App() {
     localStorage.removeItem("auth_email");
     setAuthed(false);
     setView({ name: "list" });
+  };
+
+  // 저장 완료 → 초안·전사 상태 초기화 후 상세로 이동
+  const finishSave = (id) => {
+    setDraft({ title: "", text: "" });
+    setTrans(IDLE_TRANS);
+    setView({ name: "detail", id });
   };
 
   return (
@@ -1084,13 +1249,46 @@ export default function App() {
         </div>
       </header>
       <main className="mx-auto max-w-3xl px-4 py-8">
+        {/* 탭: 회의록 / 액션 아이템 */}
+        {(view.name === "list" || view.name === "actions") && (
+          <div className="mb-6 flex gap-2">
+            {[["list", "📝 회의록"], ["actions", "✅ 액션 아이템"]].map(([name, label]) => (
+              <button
+                key={name}
+                onClick={() => setView({ name })}
+                className={`rounded-xl px-4 py-2 text-sm font-semibold ${
+                  view.name === name
+                    ? "bg-teal-700 text-white shadow-sm"
+                    : "bg-white text-slate-500 border border-slate-200 hover:bg-slate-50"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+
         {view.name === "list" && (
-          <Dashboard onOpen={(id) => setView({ name: "detail", id })} onNew={() => setView({ name: "new" })} />
+          <Dashboard
+            onOpen={(id) => setView({ name: "detail", id })}
+            onNew={() => setView({ name: "new" })}
+            trans={trans}
+            onGotoNew={() => setView({ name: "new" })}
+            onDismissTrans={() => setTrans(IDLE_TRANS)}
+          />
+        )}
+        {view.name === "actions" && (
+          <ActionItems onOpenMeeting={(id) => setView({ name: "detail", id })} />
         )}
         {view.name === "new" && (
           <NewMeeting
             settings={settings}
-            onDone={(id) => setView({ name: "detail", id })}
+            draft={draft}
+            setDraft={setDraft}
+            trans={trans}
+            onTranscribe={startTranscription}
+            onDismissTrans={() => setTrans(IDLE_TRANS)}
+            onDone={finishSave}
             onCancel={() => setView({ name: "list" })}
             onOpenSettings={() => setShowSettings(true)}
           />

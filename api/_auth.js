@@ -35,6 +35,26 @@ const safeEqual = (a, b) => {
   return timingSafeEqual(ba, bb);
 };
 
+// ── 가입 봇 방지용 챌린지 ─────────────────────────────────────
+// 폼을 열 때 발급받아 최소 3초 뒤에만 제출 가능 (자동 프로그램의 즉시 제출 차단).
+// 무상태 HMAC 서명이라 DB 불필요.
+export const issueChallenge = () => {
+  const ts = Date.now();
+  return `${ts}.${hmac("ch:" + ts)}`;
+};
+
+// 통과 시 null, 실패 시 사유 문자열 반환
+export const verifyChallenge = (challenge) => {
+  const [tsStr, sig] = String(challenge ?? "").split(".");
+  const ts = Number(tsStr);
+  if (!Number.isFinite(ts) || !sig || !safeEqual(sig, hmac("ch:" + tsStr)))
+    return "가입 확인에 실패했습니다. 페이지를 새로고침 후 다시 시도해주세요.";
+  const age = Date.now() - ts;
+  if (age < 3000) return "너무 빠른 요청입니다. 잠시 후 다시 시도해주세요.";
+  if (age > 10 * 60 * 1000) return "가입 확인이 만료되었습니다. 페이지를 새로고침 후 다시 시도해주세요.";
+  return null;
+};
+
 // 성공 시 userId(number) 반환, 실패 시 401 응답을 보내고 null 반환.
 // 사용: const userId = requireAuth(req, res); if (!userId) return;
 export const requireAuth = (req, res) => {

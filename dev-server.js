@@ -3,6 +3,7 @@
 import http from "node:http";
 import auth from "./api/auth.js";
 import meetings from "./api/meetings.js";
+import actionItems from "./api/action-items.js";
 import meetingById from "./api/meetings/[id].js";
 
 const server = http.createServer(async (req, res) => {
@@ -20,6 +21,7 @@ const server = http.createServer(async (req, res) => {
   const idMatch = url.pathname.match(/^\/api\/meetings\/(\d+)$/);
   try {
     if (url.pathname === "/api/auth") await auth(req, res);
+    else if (url.pathname === "/api/action-items") await actionItems(req, res);
     else if (url.pathname === "/api/meetings") await meetings(req, res);
     else if (idMatch) ((req.query.id = idMatch[1]), await meetingById(req, res));
     else res.status(404).json({ error: "not found" });

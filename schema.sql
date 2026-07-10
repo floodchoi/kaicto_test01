@@ -11,6 +11,7 @@ CREATE TABLE users (
 CREATE TABLE meetings (
   id         SERIAL PRIMARY KEY,
   user_id    INT REFERENCES users(id) ON DELETE CASCADE,
+  visibility TEXT NOT NULL DEFAULT 'private',  -- 'private'(나만) | 'workspace'(가입자 전체)
   title      TEXT NOT NULL,
   raw_text   TEXT NOT NULL,              -- 회의 원문 스크립트
   summary    TEXT[] NOT NULL DEFAULT '{}',  -- 3줄 요약
@@ -35,5 +36,6 @@ CREATE TABLE action_items (
 -- CREATE TABLE IF NOT EXISTS users ( id SERIAL PRIMARY KEY, email TEXT NOT NULL UNIQUE,
 --   password_hash TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now() );
 -- ALTER TABLE meetings ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE CASCADE;
+-- ALTER TABLE meetings ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'private';
 -- (기존 회의록은 user_id가 NULL이라 목록에 안 보임 — 계정 생성 후 원하는 계정에 배정:
 --  UPDATE meetings SET user_id = <내 user id> WHERE user_id IS NULL;)
