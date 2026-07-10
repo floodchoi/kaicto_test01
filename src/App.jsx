@@ -15,7 +15,11 @@ const MODELS = [
 const loadSettings = () => ({
   apiKey: localStorage.getItem("gemini_api_key") ?? "",
   model: localStorage.getItem("gemini_model") ?? MODELS[0].id,
-  // 음성 전사 전용 (선택). 비우면 위 요약용 키/모델을 그대로 사용.
+  // 요약 제공자: "gemini" | "local"(OpenAI 호환 로컬 서버)
+  summaryProvider: localStorage.getItem("summary_provider") ?? "gemini",
+  localBaseUrl: localStorage.getItem("local_base_url") ?? "http://localhost:11434/v1",
+  localModel: localStorage.getItem("local_model") ?? "",
+  // 음성 전사 전용 (선택). 비우면 위 Gemini 키/모델을 그대로 사용. (전사는 항상 Gemini)
   sttApiKey: localStorage.getItem("gemini_stt_api_key") ?? "",
   sttModel: localStorage.getItem("gemini_stt_model") ?? "",
 });
@@ -134,6 +138,118 @@ async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta) {
   return full;
 }
 
+// ── 요약: Gemini 또는 로컬 OpenAI 호환 서버 ─────────────────────
+const SUMMARY_SYSTEM = `너는 회의록 정리 전문가다. 사용자가 준 회의 스크립트를 분석해서 JSON으로 정리한다.
+규칙:
+- summary: 회의 전체를 정확히 3문장으로 요약 (한 문장 = 배열 원소 하나)
+- agenda: 주요 아젠다별로 topic(짧은 제목)과 discussion(논의 내용 2~3문장 요약)
+- action_items: 후속 업무. assignee는 원문에 언급된 담당자만, 없으면 null. due_date는 원문의 기한 표현 그대로("7월 15일", "다음 주" 등), 없으면 null.
+- tags: 회의 주제를 나타내는 태그 2~5개 (한국어, 짧게)
+- 원문에 없는 내용을 지어내지 않는다.`;
+
+// Gemini structured output 스키마 (OpenAPI 서브셋, 타입 대문자)
+const SUMMARY_GEMINI_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    summary: { type: "ARRAY", items: { type: "STRING" } },
+    agenda: {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: { topic: { type: "STRING" }, discussion: { type: "STRING" } },
+        required: ["topic", "discussion"],
+        propertyOrdering: ["topic", "discussion"],
+      },
+    },
+    action_items: {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: {
+          task: { type: "STRING" },
+          assignee: { type: "STRING", nullable: true },
+          due_date: { type: "STRING", nullable: true },
+        },
+        required: ["task", "assignee", "due_date"],
+        propertyOrdering: ["task", "assignee", "due_date"],
+      },
+    },
+    tags: { type: "ARRAY", items: { type: "STRING" } },
+  },
+  required: ["summary", "agenda", "action_items", "tags"],
+  propertyOrdering: ["summary", "agenda", "action_items", "tags"],
+};
+
+// 로컬 LLM은 스키마 강제가 제각각이라 프롬프트로 형식을 못박는다.
+const SUMMARY_JSON_HINT = `반드시 아래 JSON만 출력하라(코드펜스·설명 금지):
+{"summary":["문장1","문장2","문장3"],"agenda":[{"topic":"...","discussion":"..."}],"action_items":[{"task":"...","assignee":null,"due_date":null}],"tags":["..."]}`;
+
+const stripFences = (s) =>
+  s.replace(/^\s*```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+
+async function summarizeWithGemini(text, apiKey, model) {
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: SUMMARY_SYSTEM }] },
+        contents: [{ parts: [{ text }] }],
+        generationConfig: { responseMimeType: "application/json", responseSchema: SUMMARY_GEMINI_SCHEMA },
+      }),
+    },
+  );
+  if (!res.ok) throw new Error("요약 실패: " + (await geminiErr(res)));
+  const raw = (await res.json()).candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!raw) throw new Error("요약 응답이 비어있습니다.");
+  return JSON.parse(raw);
+}
+
+async function summarizeWithLocal(text, baseUrl, model) {
+  const url = baseUrl.replace(/\/+$/, "") + "/chat/completions";
+  let res;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        stream: false,
+        temperature: 0.2,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: SUMMARY_SYSTEM + "\n\n" + SUMMARY_JSON_HINT },
+          { role: "user", content: text },
+        ],
+      }),
+    });
+  } catch (e) {
+    throw new Error(
+      `로컬 서버에 연결할 수 없습니다 (${url}). 서버 실행 여부·주소·CORS 허용을 확인하세요. ${e.message}`,
+    );
+  }
+  if (!res.ok)
+    throw new Error(`로컬 요약 실패: ${res.status} ${(await res.text().catch(() => "")).slice(0, 200)}`);
+  const content = (await res.json()).choices?.[0]?.message?.content ?? "";
+  try {
+    return JSON.parse(stripFences(content));
+  } catch {
+    throw new Error("로컬 모델이 올바른 JSON을 반환하지 않았습니다. 더 큰 모델을 쓰거나 다시 시도하세요.");
+  }
+}
+
+// 제공자 분기
+async function summarizeText(text, settings) {
+  if (settings.summaryProvider === "local") {
+    if (!settings.localBaseUrl?.trim()) throw new Error("로컬 서버 주소를 설정에서 입력해주세요.");
+    if (!settings.localModel?.trim()) throw new Error("로컬 모델명을 설정에서 입력해주세요.");
+    return summarizeWithLocal(text, settings.localBaseUrl, settings.localModel);
+  }
+  if (!settings.apiKey) throw new Error("Gemini API 키를 설정에서 입력해주세요.");
+  return summarizeWithGemini(text, settings.apiKey, settings.model);
+}
+
 function Tag({ children }) {
   return (
     <span className="rounded-full bg-teal-50 px-2.5 py-0.5 text-xs font-medium text-teal-700">
@@ -142,82 +258,113 @@ function Tag({ children }) {
   );
 }
 
-/* ── 설정: Gemini API 키 + 모델 ──────────────────────────── */
+/* ── 설정: 요약 제공자(Gemini/로컬) + 전사(Gemini) ─────────── */
+const INPUT_CLS =
+  "mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100";
+
 function Settings({ settings, onSave, onClose }) {
   const [apiKey, setApiKey] = useState(settings.apiKey);
   const [model, setModel] = useState(settings.model);
+  const [summaryProvider, setSummaryProvider] = useState(settings.summaryProvider);
+  const [localBaseUrl, setLocalBaseUrl] = useState(settings.localBaseUrl);
+  const [localModel, setLocalModel] = useState(settings.localModel);
   const [sttApiKey, setSttApiKey] = useState(settings.sttApiKey);
   const [sttModel, setSttModel] = useState(settings.sttModel);
 
   const save = () => {
-    localStorage.setItem("gemini_api_key", apiKey.trim());
-    localStorage.setItem("gemini_model", model);
-    localStorage.setItem("gemini_stt_api_key", sttApiKey.trim());
-    localStorage.setItem("gemini_stt_model", sttModel);
-    onSave({ apiKey: apiKey.trim(), model, sttApiKey: sttApiKey.trim(), sttModel });
+    const next = {
+      apiKey: apiKey.trim(),
+      model,
+      summaryProvider,
+      localBaseUrl: localBaseUrl.trim(),
+      localModel: localModel.trim(),
+      sttApiKey: sttApiKey.trim(),
+      sttModel,
+    };
+    localStorage.setItem("gemini_api_key", next.apiKey);
+    localStorage.setItem("gemini_model", next.model);
+    localStorage.setItem("summary_provider", next.summaryProvider);
+    localStorage.setItem("local_base_url", next.localBaseUrl);
+    localStorage.setItem("local_model", next.localModel);
+    localStorage.setItem("gemini_stt_api_key", next.sttApiKey);
+    localStorage.setItem("gemini_stt_model", next.sttModel);
+    onSave(next);
     onClose();
   };
 
   return (
     <div className="fixed inset-0 z-10 flex items-center justify-center bg-slate-900/40 p-4" onClick={onClose}>
-      <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl bg-white p-6 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
         <h2 className="text-lg font-bold text-slate-800">설정</h2>
-        <p className="mt-1 text-sm text-slate-500">
-          Gemini API 키는 이 브라우저에만 저장되며 서버에 보관되지 않습니다.
+        <p className="mt-1 text-xs text-slate-500">
+          모든 값은 이 브라우저에만 저장되며 서버에 보관되지 않습니다.
         </p>
 
+        {/* Gemini 키 (전사에 필수, 요약 제공자가 Gemini면 요약에도 사용) */}
         <label className="mt-5 block text-sm font-medium text-slate-700">Gemini API 키</label>
-        <input
-          type="password"
-          value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
-          placeholder="AIza..."
-          className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
-        />
+        <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)}
+          placeholder="AIza..." className={INPUT_CLS} />
         <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer"
           className="mt-1 inline-block text-xs text-teal-700 hover:underline">
           → Google AI Studio에서 키 발급
         </a>
+        <p className="mt-1 text-xs text-slate-400">오디오 전사는 항상 Gemini를 사용하므로 이 키가 필요합니다.</p>
 
-        <label className="mt-5 block text-sm font-medium text-slate-700">모델</label>
-        <select
-          value={model}
-          onChange={(e) => setModel(e.target.value)}
-          className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
-        >
-          {MODELS.map((m) => (
-            <option key={m.id} value={m.id}>{m.label}</option>
-          ))}
-        </select>
+        {/* 요약 제공자 */}
+        <div className="mt-6 border-t border-slate-100 pt-5">
+          <h3 className="text-sm font-semibold text-slate-700">요약 제공자</h3>
+          <div className="mt-2 flex gap-2">
+            {[["gemini", "Gemini (클라우드)"], ["local", "로컬 LLM"]].map(([v, label]) => (
+              <button key={v} onClick={() => setSummaryProvider(v)}
+                className={`flex-1 rounded-xl border px-3 py-2 text-sm font-medium ${
+                  summaryProvider === v ? "border-teal-500 bg-teal-50 text-teal-700" : "border-slate-200 text-slate-500"
+                }`}>
+                {label}
+              </button>
+            ))}
+          </div>
 
-        {/* 음성 전사 전용 (선택) */}
+          {summaryProvider === "gemini" ? (
+            <>
+              <label className="mt-4 block text-sm font-medium text-slate-700">Gemini 요약 모델</label>
+              <select value={model} onChange={(e) => setModel(e.target.value)} className={INPUT_CLS + " bg-white"}>
+                {MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+              </select>
+            </>
+          ) : (
+            <>
+              <label className="mt-4 block text-sm font-medium text-slate-700">로컬 서버 주소 (OpenAI 호환)</label>
+              <input value={localBaseUrl} onChange={(e) => setLocalBaseUrl(e.target.value)}
+                placeholder="http://localhost:11434/v1" className={INPUT_CLS} />
+              <label className="mt-4 block text-sm font-medium text-slate-700">로컬 모델명</label>
+              <input value={localModel} onChange={(e) => setLocalModel(e.target.value)}
+                placeholder="예: llama3.1, qwen2.5" className={INPUT_CLS} />
+              <p className="mt-1 text-xs text-slate-400">
+                Ollama·LM Studio 등. 브라우저와 같은 PC에서 실행 중이어야 하고, 서버에 CORS 허용이 필요합니다.
+              </p>
+            </>
+          )}
+        </div>
+
+        {/* 음성 전사 전용 (선택) — 전사는 항상 Gemini */}
         <div className="mt-6 border-t border-slate-100 pt-5">
           <h3 className="text-sm font-semibold text-slate-700">음성 전사 전용 (선택)</h3>
           <p className="mt-1 text-xs text-slate-500">
-            오디오 전사에 다른 키/모델을 쓰려면 입력하세요. 비워두면 위 설정을 그대로 사용합니다.
+            전사는 항상 Gemini입니다. 다른 키/모델을 쓰려면 입력하세요. 비우면 위 Gemini 키/모델을 사용합니다.
           </p>
 
           <label className="mt-4 block text-sm font-medium text-slate-700">전사용 API 키</label>
-          <input
-            type="password"
-            value={sttApiKey}
-            onChange={(e) => setSttApiKey(e.target.value)}
-            placeholder="비워두면 위 요약용 키 사용"
-            className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
-          />
+          <input type="password" value={sttApiKey} onChange={(e) => setSttApiKey(e.target.value)}
+            placeholder="비워두면 위 Gemini 키 사용" className={INPUT_CLS} />
 
           <label className="mt-4 block text-sm font-medium text-slate-700">전사용 모델</label>
-          <input
-            list="stt-models"
-            value={sttModel}
-            onChange={(e) => setSttModel(e.target.value.trim())}
-            placeholder="비워두면 위 요약용 모델과 동일"
-            className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
-          />
+          <input list="stt-models" value={sttModel} onChange={(e) => setSttModel(e.target.value.trim())}
+            placeholder="비워두면 위 Gemini 요약 모델과 동일" className={INPUT_CLS} />
           <datalist id="stt-models">
-            {MODELS.map((m) => (
-              <option key={m.id} value={m.id}>{m.label}</option>
-            ))}
+            {MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
           </datalist>
           <p className="mt-1 text-xs text-slate-500">
             목록에서 고르거나 다른 Gemini 모델 ID를 직접 입력할 수 있습니다 (예: gemini-2.5-flash-lite).
@@ -362,19 +509,12 @@ function NewMeeting({ settings, onDone, onCancel, onOpenSettings }) {
     }
   };
 
-  // 1단계: 요약 (DB 저장 안 함)
+  // 1단계: 요약 (브라우저에서 Gemini 또는 로컬 LLM 호출, DB 저장 안 함)
   const summarize = async () => {
-    if (!settings.apiKey) {
-      setError("먼저 설정에서 Gemini API 키를 입력해주세요.");
-      return;
-    }
     setLoading(true);
     setError(null);
     try {
-      const result = await api("/api/summarize", {
-        method: "POST",
-        body: JSON.stringify({ title, text, apiKey: settings.apiKey, model: settings.model }),
-      });
+      const result = await summarizeText(text, settings);
       setPreview(result);
     } catch (e) {
       setError(e.message);
@@ -455,9 +595,11 @@ function NewMeeting({ settings, onDone, onCancel, onOpenSettings }) {
 
       <div className="flex items-center justify-between rounded-xl bg-slate-100 px-4 py-2.5 text-xs text-slate-500">
         <span>
-          {settings.apiKey
-            ? `모델: ${MODELS.find((m) => m.id === settings.model)?.label ?? settings.model}`
-            : "⚠️ API 키가 설정되지 않았습니다."}
+          {settings.summaryProvider === "local"
+            ? `요약: 로컬 ${settings.localModel || "(모델 미설정)"} @ ${settings.localBaseUrl || "(주소 미설정)"}`
+            : settings.apiKey
+              ? `요약: Gemini ${MODELS.find((m) => m.id === settings.model)?.label ?? settings.model}`
+              : "⚠️ Gemini API 키가 설정되지 않았습니다."}
         </span>
         <button onClick={onOpenSettings} className="font-medium text-teal-700 hover:underline">
           설정 변경

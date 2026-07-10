@@ -1,7 +1,6 @@
 // 로컬 전용: Vercel 서버리스 함수를 그대로 돌리는 초소형 어댑터.
 // 실행: node --env-file=.env dev-server.js  (배포 시엔 Vercel이 /api를 직접 서빙)
 import http from "node:http";
-import summarize from "./api/summarize.js";
 import meetings from "./api/meetings.js";
 import meetingById from "./api/meetings/[id].js";
 
@@ -19,8 +18,7 @@ const server = http.createServer(async (req, res) => {
 
   const idMatch = url.pathname.match(/^\/api\/meetings\/(\d+)$/);
   try {
-    if (url.pathname === "/api/summarize") await summarize(req, res);
-    else if (url.pathname === "/api/meetings") await meetings(req, res);
+    if (url.pathname === "/api/meetings") await meetings(req, res);
     else if (idMatch) ((req.query.id = idMatch[1]), await meetingById(req, res));
     else res.status(404).json({ error: "not found" });
   } catch (e) {
