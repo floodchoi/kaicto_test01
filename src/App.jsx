@@ -112,17 +112,19 @@ async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta) {
   const decoder = new TextDecoder();
   let buffer = "";
   let full = "";
+  let finishReason = "";
+  let note = "";
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true }); // stream:true → 한글 멀티바이트가 청크 경계서 안 깨지게
-    // SSE 이벤트는 빈 줄(\n\n)로 구분, 각 이벤트는 "data: {json}" 라인
-    const events = buffer.split("\n\n");
-    buffer = events.pop() ?? ""; // 마지막 미완성 조각 보존
-    for (const ev of events) {
-      const line = ev.split("\n").find((l) => l.startsWith("data:"));
-      if (!line) continue;
-      const json = line.slice(5).trim();
+    // SSE를 줄 단위로 파싱 (\n·\r\n·\r 모두 대응). 각 이벤트는 한 줄 "data: {json}".
+    const lines = buffer.split(/\r\n|\r|\n/);
+    buffer = lines.pop() ?? ""; // 마지막 미완성 줄 보존
+    for (const line of lines) {
+      const l = line.trimStart();
+      if (!l.startsWith("data:")) continue;
+      const json = l.slice(5).trim();
       if (!json || json === "[DONE]") continue;
       let obj;
       try {
@@ -130,15 +132,23 @@ async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta) {
       } catch {
         continue;
       }
-      const delta =
-        obj.candidates?.[0]?.content?.parts?.map((p) => p.text).filter(Boolean).join("") ?? "";
+      if (obj.error?.message) note = obj.error.message;
+      if (obj.promptFeedback?.blockReason) note = "차단됨: " + obj.promptFeedback.blockReason;
+      const cand = obj.candidates?.[0];
+      if (cand?.finishReason) finishReason = cand.finishReason;
+      const delta = cand?.content?.parts?.map((p) => p.text).filter(Boolean).join("") ?? "";
       if (delta) {
         full += delta;
         onDelta?.(delta);
       }
     }
   }
-  if (!full.trim()) throw new Error("전사 결과가 비어있습니다.");
+  if (!full.trim()) {
+    const why = note || (finishReason ? `finishReason=${finishReason}` : "모델이 텍스트를 반환하지 않음");
+    throw new Error(
+      `전사 결과가 비어있습니다 (${why}). 오디오에 사람 음성이 들리는지, 형식(aac/m4a/mp3/wav)이 맞는지 확인하세요.`,
+    );
+  }
   return full;
 }
 
