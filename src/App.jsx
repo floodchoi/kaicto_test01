@@ -223,6 +223,32 @@ async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, p
   return full;
 }
 
+// 전사 완료 후 제목 자동 추천 (짧은 단발 호출 — 실패해도 전사 결과엔 영향 없음)
+async function suggestTitle(text, apiKey, model) {
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              {
+                text: `다음 회의 전사문에 어울리는 간결한 회의 제목을 하나만 출력해라. 15자 내외, 따옴표·마침표·설명 없이 제목 텍스트만.\n\n${text}`,
+              },
+            ],
+          },
+        ],
+      }),
+    },
+  );
+  if (!res.ok) throw new Error(await geminiErr(res));
+  const t = (await res.json()).candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+  if (!t) throw new Error("빈 제목");
+  return t.split("\n")[0].replace(/^["'「『]+|["'」』.]+$/g, "").slice(0, 100);
+}
+
 // ── 요약: Gemini 또는 로컬 OpenAI 호환 서버 ─────────────────────
 const SUMMARY_SYSTEM = `너는 회의록 정리 전문가다. 사용자가 준 회의 스크립트를 분석해서 JSON으로 정리한다.
 규칙:
@@ -695,6 +721,17 @@ function NewMeeting({ settings, onDone, onCancel, onOpenSettings }) {
 
       // 완료 → 전체 텍스트를 입력란으로 이동
       setText((prev) => (prev.trim() ? prev.trimEnd() + "\n\n" + acc : acc));
+
+      // 제목이 비어 있으면 전사문으로 자동 추천 (실패해도 무시 — 부가 기능)
+      if (!title.trim()) {
+        try {
+          setStage("제목 추천 중…");
+          const suggested = await suggestTitle(acc.slice(0, 4000), sttKey, sttModel);
+          setTitle((prev) => (prev.trim() ? prev : suggested)); // 전사 중 사용자가 입력했으면 유지
+        } catch {
+          /* 제목 추천 실패는 조용히 넘어감 */
+        }
+      }
     } catch (e) {
       setError(e.message);
     } finally {
