@@ -1,7 +1,10 @@
 import { sql } from "../_db.js";
 import { wrap } from "../_wrap.js";
+import { requireAuth } from "../_auth.js";
 
 export default wrap(async function handler(req, res) {
+  if (!requireAuth(req, res)) return;
+
   const id = Number(req.query.id);
   if (!Number.isInteger(id)) return res.status(400).json({ error: "invalid id" });
 

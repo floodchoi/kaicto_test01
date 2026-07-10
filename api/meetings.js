@@ -1,12 +1,18 @@
 import { sql } from "./_db.js";
 import { wrap } from "./_wrap.js";
+import { requireAuth } from "./_auth.js";
 
 export default wrap(async function handler(req, res) {
+  if (!requireAuth(req, res)) return;
+
   // 미리보기 확인 후 저장: summarize 결과 + 원문을 받아 DB에 기록
   if (req.method === "POST") {
     const { title, text, summary, agenda, action_items, tags } = req.body ?? {};
     if (!title?.trim() || !text?.trim())
       return res.status(400).json({ error: "title과 text는 필수입니다." });
+    if (title.length > 300) return res.status(400).json({ error: "제목이 너무 깁니다 (최대 300자)." });
+    if (text.length > 1_000_000) return res.status(400).json({ error: "본문이 너무 깁니다 (최대 100만 자)." });
+    if ((action_items?.length ?? 0) > 100) return res.status(400).json({ error: "액션 아이템이 너무 많습니다." });
 
     const [meeting] = await sql`
       INSERT INTO meetings (title, raw_text, summary, agenda, tags)

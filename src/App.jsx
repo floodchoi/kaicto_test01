@@ -25,7 +25,20 @@ const loadSettings = () => ({
 });
 
 async function api(path, opts) {
-  const res = await fetch(path, opts && { headers: { "Content-Type": "application/json" }, ...opts });
+  const token = localStorage.getItem("auth_token");
+  const res = await fetch(path, {
+    ...opts,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token && { Authorization: `Bearer ${token}` }),
+    },
+  });
+  if (res.status === 401 && path !== "/api/login") {
+    // 토큰 만료/무효 → 로그인 화면으로 (reload 시 토큰 없어 Login 표시)
+    localStorage.removeItem("auth_token");
+    location.reload();
+    return new Promise(() => {}); // reload 전 후속 코드 실행 방지
+  }
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? `HTTP ${res.status}`);
   return res.json();
 }
@@ -269,6 +282,61 @@ function Tag({ children }) {
     <span className="rounded-full bg-teal-50 px-2.5 py-0.5 text-xs font-medium text-teal-700">
       {children}
     </span>
+  );
+}
+
+/* ── 로그인 ──────────────────────────────────────────────── */
+function Login({ onLogin }) {
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+    try {
+      const { token } = await api("/api/login", {
+        method: "POST",
+        body: JSON.stringify({ password }),
+      });
+      localStorage.setItem("auth_token", token);
+      onLogin();
+    } catch (err) {
+      setError(err.message);
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4">
+      <form onSubmit={submit} className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
+        <div className="flex items-center gap-2">
+          <span className="text-2xl">📝</span>
+          <h1 className="text-lg font-bold text-slate-800">Meeting Minutes</h1>
+        </div>
+        <p className="mt-2 text-sm text-slate-500">비밀번호를 입력해 로그인하세요.</p>
+
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          placeholder="비밀번호"
+          autoFocus
+          className="mt-5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+        />
+
+        {error && <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">⚠️ {error}</p>}
+
+        <button
+          type="submit"
+          disabled={loading || !password}
+          className="mt-5 w-full rounded-xl bg-teal-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-teal-600 disabled:opacity-40"
+        >
+          {loading ? "확인 중…" : "로그인"}
+        </button>
+      </form>
+    </div>
   );
 }
 
@@ -555,6 +623,10 @@ function NewMeeting({ settings, onDone, onCancel, onOpenSettings }) {
 
   return (
     <div className="space-y-5">
+      <button onClick={onCancel} className="text-sm font-medium text-teal-700 hover:underline">
+        ← 목록으로
+      </button>
+
       <input
         value={title}
         onChange={(e) => setTitle(e.target.value)}
@@ -824,6 +896,15 @@ export default function App() {
   const [view, setView] = useState({ name: "list" });
   const [settings, setSettings] = useState(loadSettings);
   const [showSettings, setShowSettings] = useState(false);
+  const [authed, setAuthed] = useState(() => !!localStorage.getItem("auth_token"));
+
+  if (!authed) return <Login onLogin={() => setAuthed(true)} />;
+
+  const logout = () => {
+    localStorage.removeItem("auth_token");
+    setAuthed(false);
+    setView({ name: "list" });
+  };
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -838,6 +919,13 @@ export default function App() {
             className="ml-auto rounded-lg px-2.5 py-1.5 text-sm text-slate-500 hover:bg-slate-100"
           >
             ⚙️ 설정
+          </button>
+          <button
+            onClick={logout}
+            title="로그아웃"
+            className="rounded-lg px-2.5 py-1.5 text-sm text-slate-500 hover:bg-slate-100"
+          >
+            로그아웃
           </button>
         </div>
       </header>
