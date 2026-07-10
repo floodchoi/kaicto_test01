@@ -35,23 +35,32 @@ npm run dev:front         # 프론트 → http://localhost:5173 (/api는 3001로
 
 Gemini 키는 서버가 아니라 앱 **⚙️ 설정**에서 입력합니다 (브라우저 저장, 본인 키 사용).
 
-## 배포 (GitHub → Vercel)
+## 배포 (GitHub → Vercel + Supabase)
 
+### 1) Supabase 데이터베이스 만들기
+1. [supabase.com](https://supabase.com) → **New project** 생성 (DB 비밀번호 지정, 리전 선택)
+2. 프로비저닝 완료 후 좌측 **SQL Editor** → `schema.sql` 내용 붙여넣고 **Run** (테이블 1회 생성)
+3. **Project Settings → Database → Connection pooling → Transaction** 의 URI 복사
+   - ⚠️ 반드시 **Transaction 풀러(포트 6543)** 사용. Vercel 서버리스엔 Direct(5432, IPv6)는 부적합
+   - 복사한 URI의 `[YOUR-PASSWORD]`를 실제 DB 비밀번호로 교체
+   - 형태: `postgresql://postgres.[REF]:[PW]@aws-0-[REGION].pooler.supabase.com:6543/postgres`
+   - SSL은 코드가 원격이면 자동 적용하므로 `?sslmode=require`는 붙여도/안 붙여도 됨
+
+### 2) Vercel 배포
 1. GitHub에 push (이미 연결됨)
 2. vercel.com → **Add New Project** → 이 레포 import
-   - Framework Preset: **Vite** (자동 감지) / Build: `vite build` / Output: `dist` — 그대로 두면 됨
+   - Framework Preset: **Vite** (자동 감지) / Build `vite build` / Output `dist` — 그대로
    - Root Directory: 레포 루트 그대로 (이 폴더가 곧 앱)
-3. **Storage → Neon Postgres** 생성/연결 → `DATABASE_URL` 자동 주입
-   - ⚠️ 반드시 **풀러(pooled) 연결 문자열**(host에 `-pooler` 포함)을 사용. `?sslmode=require` 유지
-4. Neon 콘솔 **SQL Editor**에서 `schema.sql` 1회 실행
-5. **Deploy** — 이후 `git push`마다 자동 재배포
-6. 접속 후 앱 **⚙️ 설정**에서 Gemini API 키 입력 + 모델 선택
+3. **Settings → Environment Variables**에 `DATABASE_URL` = 위 Supabase Transaction 풀러 문자열 추가
+   - Production 환경에 체크되어 있는지 확인. 환경변수 변경 후엔 **재배포** 필요
+4. **Deploy** — 이후 `git push`마다 자동 재배포
+5. 접속 후 앱 **⚙️ 설정**에서 Gemini API 키 입력 + 모델 선택
 
 ### 필요한 환경변수 (Vercel → Settings → Environment Variables)
 
 | 변수 | 값 | 필수 |
 |---|---|---|
-| `DATABASE_URL` | Neon 풀러 연결 문자열 (`...-pooler.../db?sslmode=require`) | ✅ (Neon 연동 시 자동 주입) |
+| `DATABASE_URL` | Supabase **Transaction 풀러**(6543) 연결 문자열 | ✅ |
 
 Gemini 키는 **서버 환경변수가 아닙니다** — 사용자가 앱 설정에서 직접 입력(브라우저 보관). 서버에 넣을 AI 키는 없습니다.
 
