@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const fmtDate = (d) =>
   new Date(d).toLocaleDateString("ko-KR", { year: "numeric", month: "short", day: "numeric" });
@@ -86,10 +86,10 @@ async function uploadAudioToGemini(file, apiKey, onStage) {
 const TRANSCRIBE_PROMPT =
   "이 오디오는 회의 녹음이다. 들리는 내용을 한국어로 정확히 전사해라. 요약하거나 생략하지 말고 말한 그대로 받아써라. 화자가 구분되면 '화자1:', '화자2:'처럼 표기해라.";
 
-// 전사도 브라우저에서 직접 Gemini 호출 (백엔드 경유 시 긴 응답이 서버 fetch 타임아웃에 걸림).
-async function transcribeWithGemini(fileUri, mimeType, apiKey, model) {
+// 전사도 브라우저에서 직접 Gemini 호출. 스트리밍(SSE)으로 받아 조각마다 onDelta 콜백.
+async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta) {
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
@@ -99,9 +99,39 @@ async function transcribeWithGemini(fileUri, mimeType, apiKey, model) {
     },
   );
   if (!res.ok) throw new Error("전사 실패: " + (await geminiErr(res)));
-  const text = (await res.json()).candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) throw new Error("전사 결과가 비어있습니다.");
-  return text;
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let full = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true }); // stream:true → 한글 멀티바이트가 청크 경계서 안 깨지게
+    // SSE 이벤트는 빈 줄(\n\n)로 구분, 각 이벤트는 "data: {json}" 라인
+    const events = buffer.split("\n\n");
+    buffer = events.pop() ?? ""; // 마지막 미완성 조각 보존
+    for (const ev of events) {
+      const line = ev.split("\n").find((l) => l.startsWith("data:"));
+      if (!line) continue;
+      const json = line.slice(5).trim();
+      if (!json || json === "[DONE]") continue;
+      let obj;
+      try {
+        obj = JSON.parse(json);
+      } catch {
+        continue;
+      }
+      const delta =
+        obj.candidates?.[0]?.content?.parts?.map((p) => p.text).filter(Boolean).join("") ?? "";
+      if (delta) {
+        full += delta;
+        onDelta?.(delta);
+      }
+    }
+  }
+  if (!full.trim()) throw new Error("전사 결과가 비어있습니다.");
+  return full;
 }
 
 function Tag({ children }) {
@@ -280,6 +310,14 @@ function NewMeeting({ settings, onDone, onCancel, onOpenSettings }) {
   const [audioFile, setAudioFile] = useState(null);
   const [transcribing, setTranscribing] = useState(false);
   const [stage, setStage] = useState("");
+  const [liveText, setLiveText] = useState(""); // 전사 실시간 진행 텍스트
+  const liveRef = useRef(null);
+
+  // 새 조각이 들어올 때마다 진행창을 맨 아래로 스크롤
+  useEffect(() => {
+    const el = liveRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [liveText]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [preview, setPreview] = useState(null); // AI 요약 결과 (아직 미저장)
@@ -304,18 +342,23 @@ function NewMeeting({ settings, onDone, onCancel, onOpenSettings }) {
     }
     setTranscribing(true);
     setError(null);
+    setLiveText("");
     try {
       // 1) 브라우저 → Gemini Files API 직접 업로드 → fileUri (업로드·전사는 같은 키여야 함)
       const { fileUri, mimeType } = await uploadAudioToGemini(audioFile, sttKey, setStage);
-      // 2) 전사도 브라우저에서 직접 (백엔드 미경유 → 서버 타임아웃 없음)
+      // 2) 전사도 브라우저에서 직접, 스트리밍으로 조각마다 진행창 갱신
       setStage("전사 중…");
-      const t = await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel);
+      const t = await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, (delta) =>
+        setLiveText((prev) => prev + delta),
+      );
+      // 완료 → 전체 텍스트를 입력란으로 이동
       setText((prev) => (prev.trim() ? prev.trimEnd() + "\n\n" + t : t));
     } catch (e) {
       setError(e.message);
     } finally {
       setTranscribing(false);
       setStage("");
+      setLiveText("");
     }
   };
 
@@ -391,6 +434,24 @@ function NewMeeting({ settings, onDone, onCancel, onOpenSettings }) {
           </button>
         )}
       </div>
+
+      {/* 전사 실시간 진행창 */}
+      {transcribing && (
+        <div className="rounded-xl border border-teal-200 bg-teal-50/40 p-4">
+          <div className="flex items-center gap-2 text-xs font-semibold text-teal-700">
+            <span className="inline-block size-2 animate-pulse rounded-full bg-teal-500" />
+            {stage || "전사 중…"}
+          </div>
+          {liveText && (
+            <pre
+              ref={liveRef}
+              className="mt-2 max-h-52 overflow-y-auto whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-700"
+            >
+              {liveText}
+            </pre>
+          )}
+        </div>
+      )}
 
       <div className="flex items-center justify-between rounded-xl bg-slate-100 px-4 py-2.5 text-xs text-slate-500">
         <span>
