@@ -1078,7 +1078,7 @@ function ActionItems({ onOpenMeeting }) {
 /* ── 새 회의록: 텍스트 입력 + 녹음 + 오디오 전사 (녹음·전사 상태는 App이 보유 → 화면 이동해도 계속) ── */
 function NewMeeting({
   settings, draft, setDraft, trans, audioFile, setAudioFile,
-  rec, onRecStart, onRecPause, onRecResume, onRecStop, recsVersion, onRecsChanged, onUseRec,
+  rec, meter, onRecStart, onRecPause, onRecResume, onRecStop, recsVersion, onRecsChanged, onUseRec,
   onTranscribe, onDismissTrans, onDone, onCancel, onOpenSettings,
 }) {
   const { title, text } = draft;
@@ -1154,15 +1154,29 @@ function NewMeeting({
       <div className="space-y-2.5 rounded-xl border border-dashed border-slate-300 px-4 py-3">
         <div className="flex flex-wrap items-center gap-3">
           {rec.status === "idle" ? (
-            <button onClick={onRecStart}
-              className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-500">
-              🔴 회의 녹음 시작
-            </button>
+            <>
+              <button onClick={() => onRecStart("mic")}
+                className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-500">
+                🔴 마이크 녹음
+              </button>
+              <button onClick={() => onRecStart("tab")}
+                title='화상회의 등 다른 탭의 소리 + 내 마이크를 함께 녹음 (Chrome 전용)'
+                className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-700">
+                🖥️ 탭 오디오 + 마이크 녹음
+              </button>
+            </>
           ) : (
             <>
               <span className="flex items-center gap-1.5 text-sm font-semibold text-red-600">
                 <span className={`inline-block size-2 rounded-full bg-red-500 ${rec.status === "recording" ? "animate-pulse" : ""}`} />
                 {fmtElapsed(rec.elapsed)}
+              </span>
+              {/* 실시간 입력 레벨 미터 */}
+              <span className="h-2 w-28 overflow-hidden rounded-full bg-slate-200" title="입력 레벨">
+                <span
+                  className={`block h-full transition-[width] duration-150 ${meter.silent ? "bg-amber-400" : "bg-teal-500"}`}
+                  style={{ width: `${Math.min(100, meter.level * 140)}%` }}
+                />
               </span>
               {rec.status === "recording" ? (
                 <button onClick={onRecPause}
@@ -1191,6 +1205,17 @@ function NewMeeting({
             변환 후 녹음 원본 삭제
           </label>
         </div>
+
+        {rec.status === "idle" && (
+          <p className="text-xs text-slate-400">
+            탭 녹음: 공유 대상에서 "Chrome 탭"을 고르고 <b>"탭 오디오 공유"</b>를 체크하세요. 공유 중지를 누르면 녹음이 자동 완료됩니다.
+          </p>
+        )}
+        {rec.status === "recording" && meter.silent && (
+          <p className="text-xs font-medium text-amber-600">
+            ⚠️ 10초 이상 소리가 감지되지 않습니다 — 마이크 음소거·탭 오디오 공유 여부를 확인하세요.
+          </p>
+        )}
 
         {rec.error && <p className="text-xs text-red-600">⚠️ {rec.error}</p>}
         {rec.done && (
@@ -1666,35 +1691,113 @@ export default function App() {
 
   /* ── 회의 녹음 (App 보유 → 화면을 이동해도 계속) ────────────
      MediaRecorder가 5초마다 조각을 만들고 즉시 IndexedDB에 임시 저장
-     → 탭 크래시·정전에도 유실 없음. 녹음 자체는 완전 로컬(오프라인 무관). */
-  const recRef = useRef({ recorder: null, stream: null, recId: null, seq: 0, timer: null, puts: [] });
+     → 탭 크래시·정전에도 유실 없음. 녹음 자체는 완전 로컬(오프라인 무관).
+     소스: 마이크 단독, 또는 탭 오디오(getDisplayMedia)+마이크 믹싱.       */
+  const recRef = useRef({
+    recorder: null, micStream: null, displayStream: null, ctx: null,
+    recId: null, seq: 0, timer: null, meterTimer: null, puts: [],
+  });
   const [rec, setRec] = useState({ status: "idle", elapsed: 0, error: null, done: null, recovered: 0 });
+  const [meter, setMeter] = useState({ level: 0, silent: false }); // 실시간 입력 레벨 모니터링
+  const lastLoudRef = useRef(0);
   const [recsVersion, setRecsVersion] = useState(0); // 보관 목록 갱신 트리거
 
-  const startRecording = async () => {
+  const cleanupRec = () => {
+    const r = recRef.current;
+    clearInterval(r.timer);
+    clearInterval(r.meterTimer);
+    r.micStream?.getTracks().forEach((t) => t.stop());
+    r.displayStream?.getTracks().forEach((t) => t.stop());
+    r.ctx?.close().catch(() => {});
+    recRef.current = {
+      recorder: null, micStream: null, displayStream: null, ctx: null,
+      recId: null, seq: 0, timer: null, meterTimer: null, puts: [],
+    };
+    setMeter({ level: 0, silent: false });
+  };
+
+  // source: "mic"(마이크만) | "tab"(탭 오디오 + 마이크)
+  const startRecording = async (source = "mic") => {
     if (rec.status !== "idle") return;
-    let stream;
+    const fail = (msg) => {
+      cleanupRec();
+      setRec((p) => ({ ...p, error: msg }));
+    };
+
+    let micStream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (e) {
-      setRec((p) => ({ ...p, error: `마이크 권한이 필요합니다. 브라우저 주소창의 권한 설정을 확인하세요. (${e.message})` }));
-      return;
+      return fail(`마이크 권한이 필요합니다. 브라우저 주소창의 권한 설정을 확인하세요. (${e.message})`);
     }
+
+    // 탭 오디오: 화면 공유 선택기에서 "Chrome 탭" + "탭 오디오 공유" 체크 필요
+    let displayStream = null;
+    if (source === "tab") {
+      try {
+        displayStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      } catch (e) {
+        micStream.getTracks().forEach((t) => t.stop());
+        return fail(`탭 선택이 취소되었거나 지원되지 않습니다 (${e.message}). Chrome에서 사용해주세요.`);
+      }
+      if (!displayStream.getAudioTracks().length) {
+        micStream.getTracks().forEach((t) => t.stop());
+        displayStream.getTracks().forEach((t) => t.stop());
+        return fail('선택한 대상에서 오디오를 받을 수 없습니다. 공유 대상으로 "Chrome 탭"을 고르고 "탭 오디오 공유"를 체크해주세요.');
+      }
+    }
+
+    // 마이크(+탭)를 AudioContext로 믹싱해 하나의 스트림으로 녹음, 같은 노드로 레벨 측정
+    const ctx = new AudioContext();
+    const dest = ctx.createMediaStreamDestination();
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    const connect = (s) => {
+      const node = ctx.createMediaStreamSource(s);
+      node.connect(dest);
+      node.connect(analyser);
+    };
+    connect(micStream);
+    if (displayStream) connect(displayStream);
+
     const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
       ? "audio/webm;codecs=opus"
       : MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4" : "";
-    const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    const recorder = new MediaRecorder(dest.stream, mime ? { mimeType: mime } : undefined);
     const recId = "rec-" + Date.now();
-    recRef.current = { recorder, stream, recId, seq: 0, timer: null, puts: [] };
+    recRef.current = {
+      recorder, micStream, displayStream, ctx,
+      recId, seq: 0, timer: null, meterTimer: null, puts: [],
+    };
     recorder.ondataavailable = (e) => {
       if (e.data?.size)
         recRef.current.puts.push(idbPutChunk(recId, recRef.current.seq++, e.data).catch(() => {}));
     };
     recorder.start(5000); // 5초마다 조각 → IndexedDB 임시 저장
+
+    // 사용자가 Chrome의 "공유 중지"를 누르면 녹음을 자동 완료
+    displayStream?.getVideoTracks()[0]?.addEventListener("ended", () => stopRecording());
+
     recRef.current.timer = setInterval(
       () => setRec((p) => (p.status === "recording" ? { ...p, elapsed: p.elapsed + 1 } : p)),
       1000,
     );
+
+    // 입력 레벨 모니터링 (150ms 간격) + 10초 이상 무음이면 경고
+    const buf = new Uint8Array(analyser.fftSize);
+    lastLoudRef.current = Date.now();
+    recRef.current.meterTimer = setInterval(() => {
+      analyser.getByteTimeDomainData(buf);
+      let peak = 0;
+      for (let i = 0; i < buf.length; i++) {
+        const dev = Math.abs(buf[i] - 128);
+        if (dev > peak) peak = dev;
+      }
+      const level = peak / 128; // 0~1
+      if (level > 0.02) lastLoudRef.current = Date.now();
+      setMeter({ level, silent: Date.now() - lastLoudRef.current > 10_000 });
+    }, 150);
+
     setRec({ status: "recording", elapsed: 0, error: null, done: null, recovered: 0 });
   };
 
@@ -1704,19 +1807,18 @@ export default function App() {
   };
   const resumeRecording = () => {
     recRef.current.recorder?.resume();
+    lastLoudRef.current = Date.now(); // 재개 시 무음 카운트 리셋
     setRec((p) => ({ ...p, status: "recording" }));
   };
 
   const stopRecording = async () => {
-    const { recorder, stream, recId, timer, puts } = recRef.current;
-    if (!recorder) return;
-    clearInterval(timer);
+    const { recorder, recId, puts } = recRef.current;
+    if (!recorder || recorder.state === "inactive") return;
     await new Promise((r) => {
       recorder.onstop = r;
       recorder.stop();
     });
-    stream.getTracks().forEach((t) => t.stop());
-    recRef.current = { recorder: null, stream: null, recId: null, seq: 0, timer: null, puts: [] };
+    cleanupRec();
     try {
       await Promise.allSettled(puts); // 마지막 조각 저장 완료 대기
       const blobs = await idbChunksOf(recId);
@@ -1901,11 +2003,20 @@ export default function App() {
           {rec.status !== "idle" && (
             <button
               onClick={() => setView({ name: "new" })}
-              title="녹음 진행 중 — 클릭하면 녹음 화면으로"
-              className="ml-2 flex items-center gap-1.5 rounded-full bg-red-50 px-3 py-1 text-xs font-semibold text-red-600"
+              title={meter.silent ? "소리가 감지되지 않습니다 — 클릭해 확인" : "녹음 진행 중 — 클릭하면 녹음 화면으로"}
+              className={`ml-2 flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold ${
+                meter.silent ? "bg-amber-50 text-amber-700" : "bg-red-50 text-red-600"
+              }`}
             >
               <span className={`inline-block size-2 rounded-full bg-red-500 ${rec.status === "recording" ? "animate-pulse" : ""}`} />
               {rec.status === "paused" ? "일시정지" : "REC"} {fmtElapsed(rec.elapsed)}
+              {/* 실시간 입력 레벨 미니 미터 */}
+              <span className="h-1.5 w-10 overflow-hidden rounded-full bg-red-200">
+                <span
+                  className="block h-full bg-red-500 transition-[width] duration-150"
+                  style={{ width: `${Math.min(100, meter.level * 140)}%` }}
+                />
+              </span>
             </button>
           )}
           <button
@@ -1968,6 +2079,7 @@ export default function App() {
             audioFile={audioFile}
             setAudioFile={setAudioFile}
             rec={rec}
+            meter={meter}
             onRecStart={startRecording}
             onRecPause={pauseRecording}
             onRecResume={resumeRecording}
