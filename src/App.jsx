@@ -79,6 +79,7 @@ const MAX_AUDIO_BYTES = 100 * 1024 * 1024; // Gemini 파일 상한은 훨씬 크
 const AUDIO_MIME = {
   aac: "audio/aac", m4a: "audio/aac", mp3: "audio/mp3",
   wav: "audio/wav", ogg: "audio/ogg", flac: "audio/flac", aiff: "audio/aiff",
+  webm: "audio/webm", // 브라우저 녹음 컨테이너 — 통짜 전사 시 WAV로 변환됨
 };
 const mimeFor = (file) =>
   AUDIO_MIME[file.name.split(".").pop().toLowerCase()] ?? file.type ?? "audio/aac";
@@ -86,14 +87,22 @@ const mimeFor = (file) =>
 const geminiErr = async (res) =>
   (await res.json().catch(() => ({}))).error?.message ?? `Gemini ${res.status}`;
 
-// Gemini fetch 래퍼: 네트워크 오류("Failed to fetch")를 1회 재시도하고,
+// 오프라인이면 연결이 복구될 때까지 대기 (오류 내지 않음)
+const waitOnline = () =>
+  navigator.onLine
+    ? Promise.resolve()
+    : new Promise((r) => window.addEventListener("online", r, { once: true }));
+
+// Gemini fetch 래퍼: 오프라인이면 복구까지 대기, 일시 오류는 최대 2회 재시도.
 // 그래도 실패하면 어느 단계였는지 + 흔한 원인을 담아 보고한다.
 async function gfetch(url, opts, what) {
-  for (let attempt = 0; ; attempt++) {
+  for (let attempt = 0; ; ) {
     try {
+      await waitOnline();
       return await fetch(url, opts);
     } catch (e) {
-      if (attempt >= 1)
+      if (!navigator.onLine) continue; // 전송 중 끊김 → 복구 대기 후 재시도 (시도 횟수 미소모)
+      if (++attempt > 2)
         throw new Error(
           `${what} 중 네트워크 오류 (${e.message}). 인터넷 연결 상태와, 광고차단기·보안 프로그램이 googleapis.com을 차단하고 있지 않은지 확인한 뒤 다시 시도해주세요.`,
         );
@@ -210,6 +219,130 @@ async function splitAudioToWavChunks(file) {
   }
   return chunks;
 }
+
+// 통짜 파일이 Gemini 미지원 컨테이너(webm 등)일 때 단일 WAV로 변환
+async function toWavFile(file) {
+  const probe = new AudioContext();
+  let decoded;
+  try {
+    decoded = await probe.decodeAudioData(await file.arrayBuffer());
+  } finally {
+    probe.close();
+  }
+  const frames = Math.ceil(decoded.duration * SPLIT_RATE);
+  const off = new OfflineAudioContext(1, frames, SPLIT_RATE);
+  const src = off.createBufferSource();
+  src.buffer = decoded;
+  src.connect(off.destination);
+  src.start();
+  const mono = (await off.startRendering()).getChannelData(0);
+  return new File([encodeWav(mono, SPLIT_RATE)], file.name.replace(/\.\w+$/, "") + ".wav", {
+    type: "audio/wav",
+  });
+}
+
+/* ── 녹음 임시 저장소 (IndexedDB) ──────────────────────────────
+   브라우저 앱의 "temp 폴더" 역할. 녹음 중 5초마다 조각을 저장해
+   탭 크래시·정전에도 유실을 막고, 완료본은 보관 목록으로 관리한다. */
+const idbOpen = () =>
+  new Promise((resolve, reject) => {
+    const req = indexedDB.open("meeting-rec", 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      const chunks = db.createObjectStore("chunks", { autoIncrement: true });
+      chunks.createIndex("rec", "recId");
+      db.createObjectStore("recs", { keyPath: "id" });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+
+const idbReq = (req) =>
+  new Promise((resolve, reject) => {
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+
+const idbPutChunk = async (recId, seq, blob) => {
+  const db = await idbOpen();
+  try {
+    await idbReq(db.transaction("chunks", "readwrite").objectStore("chunks").put({ recId, seq, blob }));
+  } finally {
+    db.close();
+  }
+};
+
+// recId의 조각들을 순서대로 반환
+const idbChunksOf = async (recId) => {
+  const db = await idbOpen();
+  try {
+    const rows = await idbReq(db.transaction("chunks", "readonly").objectStore("chunks").index("rec").getAll(recId));
+    return rows.sort((a, b) => a.seq - b.seq).map((r) => r.blob);
+  } finally {
+    db.close();
+  }
+};
+
+const idbClearChunks = async (recId) => {
+  const db = await idbOpen();
+  try {
+    const store = db.transaction("chunks", "readwrite").objectStore("chunks");
+    const keys = await idbReq(store.index("rec").getAllKeys(recId));
+    for (const k of keys) store.delete(k);
+    await new Promise((r) => (store.transaction.oncomplete = r));
+  } finally {
+    db.close();
+  }
+};
+
+const idbAllChunks = async () => {
+  const db = await idbOpen();
+  try {
+    return await idbReq(db.transaction("chunks", "readonly").objectStore("chunks").getAll());
+  } finally {
+    db.close();
+  }
+};
+
+const idbSaveRec = async (rec) => {
+  const db = await idbOpen();
+  try {
+    await idbReq(db.transaction("recs", "readwrite").objectStore("recs").put(rec));
+  } finally {
+    db.close();
+  }
+};
+
+const idbListRecs = async () => {
+  const db = await idbOpen();
+  try {
+    const rows = await idbReq(db.transaction("recs", "readonly").objectStore("recs").getAll());
+    return rows.sort((a, b) => b.createdAt - a.createdAt);
+  } finally {
+    db.close();
+  }
+};
+
+const idbDeleteRec = async (id) => {
+  const db = await idbOpen();
+  try {
+    await idbReq(db.transaction("recs", "readwrite").objectStore("recs").delete(id));
+  } finally {
+    db.close();
+  }
+};
+
+const fmtElapsed = (s) =>
+  `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+
+// 원본 녹음 파일을 다운로드 폴더로 저장 (브라우저 다운로드 UI에서 "Finder에서 보기" 가능)
+const downloadBlob = (blob, name) => {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+};
 
 // 전사도 브라우저에서 직접 Gemini 호출. 스트리밍(SSE)으로 받아 조각마다 onDelta 콜백.
 async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, prompt = TRANSCRIBE_PROMPT) {
@@ -942,13 +1075,25 @@ function ActionItems({ onOpenMeeting }) {
   );
 }
 
-/* ── 새 회의록: 텍스트 입력 + 오디오 전사 (전사 상태는 App이 보유 → 화면 이동해도 계속) ── */
-function NewMeeting({ settings, draft, setDraft, trans, onTranscribe, onDismissTrans, onDone, onCancel, onOpenSettings }) {
+/* ── 새 회의록: 텍스트 입력 + 녹음 + 오디오 전사 (녹음·전사 상태는 App이 보유 → 화면 이동해도 계속) ── */
+function NewMeeting({
+  settings, draft, setDraft, trans, audioFile, setAudioFile,
+  rec, onRecStart, onRecPause, onRecResume, onRecStop, recsVersion, onRecsChanged, onUseRec,
+  onTranscribe, onDismissTrans, onDone, onCancel, onOpenSettings,
+}) {
   const { title, text } = draft;
   const setTitle = (v) => setDraft((p) => ({ ...p, title: v }));
   const setText = (v) => setDraft((p) => ({ ...p, text: v }));
-  const [audioFile, setAudioFile] = useState(null);
   const [visibility, setVisibility] = useState("private");
+
+  // 변환 후 녹음 원본 삭제 옵션 (localStorage 유지)
+  const [deleteAfter, setDeleteAfter] = useState(() => localStorage.getItem("rec_delete_after") === "1");
+  // 보관된 녹음 목록 (IndexedDB)
+  const [savedRecs, setSavedRecs] = useState([]);
+  const [showRecs, setShowRecs] = useState(false);
+  useEffect(() => {
+    idbListRecs().then(setSavedRecs).catch(() => {});
+  }, [recsVersion, trans.status]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [preview, setPreview] = useState(null); // AI 요약 결과 (아직 미저장)
@@ -1005,13 +1150,96 @@ function NewMeeting({ settings, draft, setDraft, trans, onTranscribe, onDismissT
         className="w-full resize-y rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm leading-relaxed shadow-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
       />
 
+      {/* 회의 녹음 — 화면을 이동해도 계속 녹음 · 5초마다 로컬(IndexedDB) 임시 저장 */}
+      <div className="space-y-2.5 rounded-xl border border-dashed border-slate-300 px-4 py-3">
+        <div className="flex flex-wrap items-center gap-3">
+          {rec.status === "idle" ? (
+            <button onClick={onRecStart}
+              className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-500">
+              🔴 회의 녹음 시작
+            </button>
+          ) : (
+            <>
+              <span className="flex items-center gap-1.5 text-sm font-semibold text-red-600">
+                <span className={`inline-block size-2 rounded-full bg-red-500 ${rec.status === "recording" ? "animate-pulse" : ""}`} />
+                {fmtElapsed(rec.elapsed)}
+              </span>
+              {rec.status === "recording" ? (
+                <button onClick={onRecPause}
+                  className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-200">
+                  ⏸ 일시정지
+                </button>
+              ) : (
+                <button onClick={onRecResume}
+                  className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-200">
+                  ▶ 재개
+                </button>
+              )}
+              <button onClick={onRecStop}
+                className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-700">
+                ⏹ 녹음 완료
+              </button>
+            </>
+          )}
+          <label className="ml-auto flex cursor-pointer items-center gap-1.5 text-xs text-slate-500">
+            <input type="checkbox" checked={deleteAfter}
+              onChange={(e) => {
+                setDeleteAfter(e.target.checked);
+                localStorage.setItem("rec_delete_after", e.target.checked ? "1" : "");
+              }}
+              className="size-3.5 accent-teal-700" />
+            변환 후 녹음 원본 삭제
+          </label>
+        </div>
+
+        {rec.error && <p className="text-xs text-red-600">⚠️ {rec.error}</p>}
+        {rec.done && (
+          <p className="text-xs text-teal-700">
+            ✅ 녹음 완료: {rec.done} — 아래 "텍스트로 변환"을 누르세요. (보관된 녹음에도 저장됨)
+          </p>
+        )}
+        {rec.recovered > 0 && (
+          <p className="text-xs text-amber-600">
+            ↩️ 지난 세션의 녹음 {rec.recovered}개를 복구했습니다 — "보관된 녹음"에서 확인하세요.
+          </p>
+        )}
+
+        <button onClick={() => setShowRecs(!showRecs)}
+          className="text-xs font-medium text-slate-500 hover:text-slate-700">
+          {showRecs ? "▾" : "▸"} 보관된 녹음 {savedRecs.length}개
+        </button>
+        {showRecs && savedRecs.length > 0 && (
+          <ul className="space-y-1.5">
+            {savedRecs.map((r) => (
+              <li key={r.id} className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
+                <span className="min-w-0 flex-1 truncate">
+                  {r.name} · {fmtDateTime(r.createdAt)} · {(r.blob.size / 1048576).toFixed(1)}MB
+                </span>
+                <button onClick={() => onUseRec(r)} className="font-medium text-teal-700 hover:underline">
+                  전사에 사용
+                </button>
+                <button onClick={() => downloadBlob(r.blob, r.name)}
+                  title="다운로드 폴더에 저장 — 브라우저 다운로드 목록에서 'Finder에서 보기'로 원본 접근"
+                  className="font-medium text-slate-500 hover:underline">
+                  💾 파일로 저장
+                </button>
+                <button onClick={async () => { await idbDeleteRec(r.id); onRecsChanged(); }}
+                  title="보관 녹음 삭제" className="text-slate-400 hover:text-red-500">
+                  🗑
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
       {/* 오디오 업로드 → Gemini 전사 → 위 입력란에 텍스트 채움 (목록으로 이동해도 계속 진행) */}
       <div className="flex items-center gap-3 rounded-xl border border-dashed border-slate-300 px-4 py-3">
         <label className="flex flex-1 cursor-pointer items-center gap-2 text-sm text-slate-500">
           {/* 일부 브라우저는 audio/* 만으로 .aac를 안 걸러줘서 확장자를 명시 */}
-          <input type="file" accept="audio/*,.aac,.m4a,.mp3,.wav" className="hidden"
+          <input type="file" accept="audio/*,.aac,.m4a,.mp3,.wav,.webm" className="hidden"
             onChange={(e) => setAudioFile(e.target.files?.[0] ?? null)} />
-          <span>🎙️ {audioFile?.name ?? "오디오 파일 선택 (aac, m4a, mp3, wav · 최대 100MB)"}</span>
+          <span>🎙️ {audioFile?.name ?? "오디오 파일 선택 (aac, m4a, mp3, wav, webm · 최대 100MB)"}</span>
         </label>
         {audioFile && (
           <button
@@ -1428,6 +1656,119 @@ export default function App() {
   const [draft, setDraft] = useState({ title: "", text: "" });
   const [trans, setTrans] = useState(IDLE_TRANS);
 
+  // 오디오 파일(선택 또는 녹음 결과)도 App 보유 → 화면 이동에도 유지
+  const [audioFile, setAudioFileState] = useState(null);
+  const [recMeta, setRecMeta] = useState(null); // audioFile이 녹음본일 때 { recId }
+  const setAudioFile = (f) => {
+    setAudioFileState(f);
+    setRecMeta(null); // 파일 직접 선택 시 녹음본 연결 해제
+  };
+
+  /* ── 회의 녹음 (App 보유 → 화면을 이동해도 계속) ────────────
+     MediaRecorder가 5초마다 조각을 만들고 즉시 IndexedDB에 임시 저장
+     → 탭 크래시·정전에도 유실 없음. 녹음 자체는 완전 로컬(오프라인 무관). */
+  const recRef = useRef({ recorder: null, stream: null, recId: null, seq: 0, timer: null, puts: [] });
+  const [rec, setRec] = useState({ status: "idle", elapsed: 0, error: null, done: null, recovered: 0 });
+  const [recsVersion, setRecsVersion] = useState(0); // 보관 목록 갱신 트리거
+
+  const startRecording = async () => {
+    if (rec.status !== "idle") return;
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      setRec((p) => ({ ...p, error: `마이크 권한이 필요합니다. 브라우저 주소창의 권한 설정을 확인하세요. (${e.message})` }));
+      return;
+    }
+    const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+      ? "audio/webm;codecs=opus"
+      : MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4" : "";
+    const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    const recId = "rec-" + Date.now();
+    recRef.current = { recorder, stream, recId, seq: 0, timer: null, puts: [] };
+    recorder.ondataavailable = (e) => {
+      if (e.data?.size)
+        recRef.current.puts.push(idbPutChunk(recId, recRef.current.seq++, e.data).catch(() => {}));
+    };
+    recorder.start(5000); // 5초마다 조각 → IndexedDB 임시 저장
+    recRef.current.timer = setInterval(
+      () => setRec((p) => (p.status === "recording" ? { ...p, elapsed: p.elapsed + 1 } : p)),
+      1000,
+    );
+    setRec({ status: "recording", elapsed: 0, error: null, done: null, recovered: 0 });
+  };
+
+  const pauseRecording = () => {
+    recRef.current.recorder?.pause();
+    setRec((p) => ({ ...p, status: "paused" }));
+  };
+  const resumeRecording = () => {
+    recRef.current.recorder?.resume();
+    setRec((p) => ({ ...p, status: "recording" }));
+  };
+
+  const stopRecording = async () => {
+    const { recorder, stream, recId, timer, puts } = recRef.current;
+    if (!recorder) return;
+    clearInterval(timer);
+    await new Promise((r) => {
+      recorder.onstop = r;
+      recorder.stop();
+    });
+    stream.getTracks().forEach((t) => t.stop());
+    recRef.current = { recorder: null, stream: null, recId: null, seq: 0, timer: null, puts: [] };
+    try {
+      await Promise.allSettled(puts); // 마지막 조각 저장 완료 대기
+      const blobs = await idbChunksOf(recId);
+      const type = blobs[0]?.type || "audio/webm";
+      const raw = new Blob(blobs, { type });
+      const ext = type.includes("mp4") ? "m4a" : "webm";
+      const name = `녹음-${new Date().toLocaleString("sv").replace(/[ :]/g, "-").slice(0, 16)}.${ext}`;
+      await idbSaveRec({ id: recId, name, createdAt: Date.now(), blob: raw });
+      await idbClearChunks(recId);
+      setRecsVersion((v) => v + 1);
+      setAudioFileState(new File([raw], name, { type }));
+      setRecMeta({ recId });
+      setRec({ status: "idle", elapsed: 0, error: null, done: name, recovered: 0 });
+    } catch (e) {
+      setRec({ status: "idle", elapsed: 0, done: null, recovered: 0, error: "녹음 저장 실패: " + e.message });
+    }
+  };
+
+  // 보관된 녹음을 전사용으로 불러오기
+  const useSavedRec = (r) => {
+    setAudioFileState(new File([r.blob], r.name, { type: r.blob.type || "audio/webm" }));
+    setRecMeta({ recId: r.id });
+    setView({ name: "new" });
+  };
+
+  // 지난 세션(탭 크래시 등)의 미완성 녹음 복구 → 보관 목록으로
+  useEffect(() => {
+    (async () => {
+      try {
+        const all = await idbAllChunks();
+        if (!all.length) return;
+        const byRec = {};
+        for (const c of all) (byRec[c.recId] ??= []).push(c);
+        for (const [recId, cs] of Object.entries(byRec)) {
+          cs.sort((a, b) => a.seq - b.seq);
+          const type = cs[0].blob.type || "audio/webm";
+          await idbSaveRec({
+            id: recId,
+            name: recId.replace("rec-", "복구된-녹음-") + ".webm",
+            createdAt: Date.now(),
+            blob: new Blob(cs.map((c) => c.blob), { type }),
+          });
+          await idbClearChunks(recId);
+        }
+        setRecsVersion((v) => v + 1);
+        setRec((p) => ({ ...p, recovered: Object.keys(byRec).length }));
+      } catch {
+        /* 복구 실패는 조용히 넘어감 */
+      }
+    })();
+  }, []);
+
   // 오디오 → 텍스트 (백그라운드 실행: 어느 화면에 있든 진행)
   const startTranscription = async (audioFile) => {
     if (trans.status === "running") return;
@@ -1444,10 +1785,31 @@ export default function App() {
     const setStage = (stage) => setTrans((p) => ({ ...p, stage }));
     const addDelta = (delta) => setTrans((p) => ({ ...p, liveText: p.liveText + delta }));
     setTrans({ status: "running", stage: "오디오 분석 중…", liveText: "", fileName: audioFile.name, error: null });
+
+    // 전사 수신 도중 네트워크가 끊기면: 복구를 기다렸다가 해당 조각을 1회 자동 재시도
+    const transcribeWithRetry = async (fileUri, mimeType, prompt, resetLive) => {
+      try {
+        return await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, addDelta, prompt);
+      } catch (e) {
+        if (!/중단|네트워크/.test(e.message)) throw e; // 네트워크성 오류만 재시도
+        setStage("네트워크 복구 대기 중…");
+        await waitOnline();
+        resetLive(); // 부분 수신분 정리 후 다시
+        setStage("연결 복구 — 재시도 중…");
+        return await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, addDelta, prompt);
+      }
+    };
+
     try {
+      if (!navigator.onLine) {
+        setStage("네트워크 연결 대기 중… (녹음/파일은 안전하게 보관됩니다)");
+        await waitOnline();
+      }
+
       // 긴 파일은 5분 조각으로 분할 → 조각마다 전사 결과가 도착 (준실시간 체감)
       let chunks = null;
       try {
+        setStage("오디오 분석 중…");
         chunks = await splitAudioToWavChunks(audioFile);
       } catch {
         chunks = null; // 디코딩 실패(특이 코덱 등) → 통짜 전사로 폴백
@@ -1462,18 +1824,26 @@ export default function App() {
           );
           setStage(`${label} · 전사 중…`);
           const prevTail = acc.slice(-200).trim();
-          const t = await transcribeWithGemini(
-            fileUri, mimeType, sttKey, sttModel, addDelta,
+          const t = await transcribeWithRetry(
+            fileUri, mimeType,
             prevTail ? contPrompt(prevTail) : TRANSCRIBE_PROMPT,
+            () => setTrans((p) => ({ ...p, liveText: acc ? acc + "\n" : "" })),
           );
           acc = acc ? acc.trimEnd() + "\n" + t.trim() : t.trim();
           setTrans((p) => ({ ...p, liveText: acc + "\n" }));
         }
       } else {
-        // 짧은 파일(또는 분할 실패): 원본 그대로 통짜 전사
-        const { fileUri, mimeType } = await uploadAudioToGemini(audioFile, sttKey, setStage);
+        // 짧은 파일(또는 분할 실패): 통짜 전사. 녹음 컨테이너(webm)는 Gemini 미지원 → WAV 변환
+        let sendFile = audioFile;
+        if (/webm/i.test(audioFile.type) || /\.webm$/i.test(audioFile.name)) {
+          setStage("녹음 변환 중…");
+          sendFile = await toWavFile(audioFile);
+        }
+        const { fileUri, mimeType } = await uploadAudioToGemini(sendFile, sttKey, setStage);
         setStage("전사 중…");
-        acc = await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, addDelta);
+        acc = await transcribeWithRetry(fileUri, mimeType, TRANSCRIBE_PROMPT, () =>
+          setTrans((p) => ({ ...p, liveText: "" })),
+        );
       }
 
       // 완료 → 초안 입력란에 채움 (사용자가 어느 화면에 있든)
@@ -1492,6 +1862,13 @@ export default function App() {
       }
 
       setTrans({ status: "done", stage: "", liveText: "", fileName: audioFile.name, error: null });
+
+      // 옵션: 변환 성공 후 녹음 원본 삭제 (보관 목록에서 제거)
+      if (recMeta && localStorage.getItem("rec_delete_after") === "1") {
+        idbDeleteRec(recMeta.recId).catch(() => {});
+        setRecMeta(null);
+        setRecsVersion((v) => v + 1);
+      }
     } catch (e) {
       fail(e.message);
     }
@@ -1520,6 +1897,17 @@ export default function App() {
           <span className="text-xl">📝</span>
           <h1 className="font-bold text-slate-800">Meeting Minutes</h1>
           <span className="ml-1 rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500">AI 요약</span>
+          {/* 녹음 중 전역 표시 — 어느 화면에서든 보이고, 클릭하면 녹음 화면으로 */}
+          {rec.status !== "idle" && (
+            <button
+              onClick={() => setView({ name: "new" })}
+              title="녹음 진행 중 — 클릭하면 녹음 화면으로"
+              className="ml-2 flex items-center gap-1.5 rounded-full bg-red-50 px-3 py-1 text-xs font-semibold text-red-600"
+            >
+              <span className={`inline-block size-2 rounded-full bg-red-500 ${rec.status === "recording" ? "animate-pulse" : ""}`} />
+              {rec.status === "paused" ? "일시정지" : "REC"} {fmtElapsed(rec.elapsed)}
+            </button>
+          )}
           <button
             onClick={() => setShowSettings(true)}
             title="설정"
@@ -1577,6 +1965,16 @@ export default function App() {
             draft={draft}
             setDraft={setDraft}
             trans={trans}
+            audioFile={audioFile}
+            setAudioFile={setAudioFile}
+            rec={rec}
+            onRecStart={startRecording}
+            onRecPause={pauseRecording}
+            onRecResume={resumeRecording}
+            onRecStop={stopRecording}
+            recsVersion={recsVersion}
+            onRecsChanged={() => setRecsVersion((v) => v + 1)}
+            onUseRec={useSavedRec}
             onTranscribe={startTranscription}
             onDismissTrans={() => setTrans(IDLE_TRANS)}
             onDone={finishSave}
