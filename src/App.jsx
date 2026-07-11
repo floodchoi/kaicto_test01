@@ -241,6 +241,35 @@ async function toWavFile(file) {
   });
 }
 
+// 여러 오디오 파일을 순서대로 이어붙여 하나의 16kHz 모노 WAV로 병합
+// (webm 컨테이너는 단순 바이트 연결이 불가능해 PCM으로 디코딩 후 연결)
+async function mergeAudioToWav(files, name) {
+  const parts = [];
+  for (const f of files) {
+    const probe = new AudioContext();
+    let decoded;
+    try {
+      decoded = await probe.decodeAudioData(await f.arrayBuffer());
+    } finally {
+      probe.close();
+    }
+    const frames = Math.ceil(decoded.duration * SPLIT_RATE);
+    const off = new OfflineAudioContext(1, frames, SPLIT_RATE);
+    const src = off.createBufferSource();
+    src.buffer = decoded;
+    src.connect(off.destination);
+    src.start();
+    parts.push((await off.startRendering()).getChannelData(0));
+  }
+  const merged = new Float32Array(parts.reduce((n, p) => n + p.length, 0));
+  let offset = 0;
+  for (const p of parts) {
+    merged.set(p, offset);
+    offset += p.length;
+  }
+  return new File([encodeWav(merged, SPLIT_RATE)], name, { type: "audio/wav" });
+}
+
 /* ── 녹음 임시 저장소 (IndexedDB) ──────────────────────────────
    브라우저 앱의 "temp 폴더" 역할. 녹음 중 5초마다 조각을 저장해
    탭 크래시·정전에도 유실을 막고, 완료본은 보관 목록으로 관리한다. */
@@ -1078,9 +1107,11 @@ function ActionItems({ onOpenMeeting }) {
 /* ── 새 회의록: 텍스트 입력 + 녹음 + 오디오 전사 (녹음·전사 상태는 App이 보유 → 화면 이동해도 계속) ── */
 function NewMeeting({
   settings, draft, setDraft, trans, audioFile, setAudioFile,
-  rec, meter, onRecStart, onRecPause, onRecResume, onRecStop, recsVersion, onRecsChanged, onUseRec,
+  rec, meter, canAppend, onRecStart, onRecPause, onRecResume, onRecStop, recsVersion, onRecsChanged, onUseRec,
   onTranscribe, onDismissTrans, onDone, onCancel, onOpenSettings,
 }) {
+  // 이전 녹음이 있을 때 새 녹음 방식: "new"(대체) | "append"(이어붙임)
+  const [recMode, setRecMode] = useState("new");
   const { title, text } = draft;
   const setTitle = (v) => setDraft((p) => ({ ...p, title: v }));
   const setText = (v) => setDraft((p) => ({ ...p, text: v }));
@@ -1155,11 +1186,11 @@ function NewMeeting({
         <div className="flex flex-wrap items-center gap-3">
           {rec.status === "idle" ? (
             <>
-              <button onClick={() => onRecStart("mic")}
+              <button onClick={() => onRecStart("mic", canAppend ? recMode : "new")}
                 className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-500">
                 🔴 마이크 녹음
               </button>
-              <button onClick={() => onRecStart("tab")}
+              <button onClick={() => onRecStart("tab", canAppend ? recMode : "new")}
                 title='화상회의 등 다른 탭의 소리 + 내 마이크를 함께 녹음 (Chrome 전용)'
                 className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-700">
                 🖥️ 탭 오디오 + 마이크 녹음
@@ -1205,6 +1236,23 @@ function NewMeeting({
             변환 후 녹음 원본 삭제
           </label>
         </div>
+
+        {/* 이전 녹음이 있을 때: 대체 or 이어붙임 선택 */}
+        {rec.status === "idle" && canAppend && (
+          <div className="flex flex-wrap items-center gap-4 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600">
+            <span className="font-medium">이전 녹음({audioFile?.name})이 있습니다 — 새 녹음 방식:</span>
+            <label className="flex cursor-pointer items-center gap-1.5">
+              <input type="radio" name="recMode" checked={recMode === "new"}
+                onChange={() => setRecMode("new")} className="accent-teal-700" />
+              새로 녹음 (이전 녹음 대체)
+            </label>
+            <label className="flex cursor-pointer items-center gap-1.5">
+              <input type="radio" name="recMode" checked={recMode === "append"}
+                onChange={() => setRecMode("append")} className="accent-teal-700" />
+              이어서 녹음 (이전 녹음 뒤에 연결)
+            </label>
+          </div>
+        )}
 
         {rec.status === "idle" && (
           <p className="text-xs text-slate-400">
@@ -1717,12 +1765,22 @@ export default function App() {
   };
 
   // source: "mic"(마이크만) | "tab"(탭 오디오 + 마이크)
-  const startRecording = async (source = "mic") => {
+  // mode: "new"(이전 활성 녹음 대체) | "append"(이전 녹음 뒤에 연결)
+  const startRecording = async (source = "mic", mode = "new") => {
     if (rec.status !== "idle") return;
     const fail = (msg) => {
       cleanupRec();
       setRec((p) => ({ ...p, error: msg }));
     };
+
+    // 이전 녹음본 처리: append면 완료 시 병합할 대상으로 보관, new면 활성 파일에서 해제
+    let appendPrev = null;
+    if (mode === "append" && recMeta && audioFile) {
+      appendPrev = { file: audioFile, recId: recMeta.recId };
+    } else if (recMeta) {
+      setAudioFileState(null); // 새로 녹음 — 이전 녹음은 화면에서 치움 (보관 목록에는 유지)
+      setRecMeta(null);
+    }
 
     let micStream;
     try {
@@ -1766,7 +1824,7 @@ export default function App() {
     const recorder = new MediaRecorder(dest.stream, mime ? { mimeType: mime } : undefined);
     const recId = "rec-" + Date.now();
     recRef.current = {
-      recorder, micStream, displayStream, ctx,
+      recorder, micStream, displayStream, ctx, appendPrev,
       recId, seq: 0, timer: null, meterTimer: null, puts: [],
     };
     recorder.ondataavailable = (e) => {
@@ -1812,7 +1870,7 @@ export default function App() {
   };
 
   const stopRecording = async () => {
-    const { recorder, recId, puts } = recRef.current;
+    const { recorder, recId, puts, appendPrev } = recRef.current;
     if (!recorder || recorder.state === "inactive") return;
     await new Promise((r) => {
       recorder.onstop = r;
@@ -1824,14 +1882,30 @@ export default function App() {
       const blobs = await idbChunksOf(recId);
       const type = blobs[0]?.type || "audio/webm";
       const raw = new Blob(blobs, { type });
-      const ext = type.includes("mp4") ? "m4a" : "webm";
-      const name = `녹음-${new Date().toLocaleString("sv").replace(/[ :]/g, "-").slice(0, 16)}.${ext}`;
-      await idbSaveRec({ id: recId, name, createdAt: Date.now(), blob: raw });
+      const ts = new Date().toLocaleString("sv").replace(/[ :]/g, "-").slice(0, 16);
+
+      let file;
+      if (appendPrev) {
+        // 이어서 녹음: 이전 녹음 + 새 녹음을 하나의 WAV로 병합, 이전 보관본은 병합본으로 대체
+        const ext = type.includes("mp4") ? "m4a" : "webm";
+        file = await mergeAudioToWav(
+          [appendPrev.file, new File([raw], `part.${ext}`, { type })],
+          `녹음-${ts}-이어붙임.wav`,
+        );
+        await idbSaveRec({ id: recId, name: file.name, createdAt: Date.now(), blob: file });
+        await idbDeleteRec(appendPrev.recId);
+      } else {
+        const ext = type.includes("mp4") ? "m4a" : "webm";
+        const name = `녹음-${ts}.${ext}`;
+        file = new File([raw], name, { type });
+        await idbSaveRec({ id: recId, name, createdAt: Date.now(), blob: raw });
+      }
+
       await idbClearChunks(recId);
       setRecsVersion((v) => v + 1);
-      setAudioFileState(new File([raw], name, { type }));
+      setAudioFileState(file);
       setRecMeta({ recId });
-      setRec({ status: "idle", elapsed: 0, error: null, done: name, recovered: 0 });
+      setRec({ status: "idle", elapsed: 0, error: null, done: file.name, recovered: 0 });
     } catch (e) {
       setRec({ status: "idle", elapsed: 0, done: null, recovered: 0, error: "녹음 저장 실패: " + e.message });
     }
@@ -2080,6 +2154,7 @@ export default function App() {
             setAudioFile={setAudioFile}
             rec={rec}
             meter={meter}
+            canAppend={!!recMeta && !!audioFile}
             onRecStart={startRecording}
             onRecPause={pauseRecording}
             onRecResume={resumeRecording}
