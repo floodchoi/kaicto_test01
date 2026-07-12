@@ -43,7 +43,8 @@ async function listGeminiModels(apiKey) {
 // ponytail: 키는 브라우저 localStorage에 보관(본인 키 사용 모델). 서버 DB에 저장 안 함.
 // 팀 공유·다중 사용자로 가면 서버 측 암호화 저장으로 전환.
 const loadSettings = () => ({
-  apiKey: localStorage.getItem("gemini_api_key") ?? "",
+  apiKey: "", // 사용자별 서버 저장 — 로그인 후 /api/me에서 하이드레이션
+
   model: localStorage.getItem("gemini_model") ?? MODELS[0].id,
   // 요약 제공자: "gemini" | "local"(OpenAI 호환 로컬 서버)
   summaryProvider: localStorage.getItem("summary_provider") ?? "gemini",
@@ -697,7 +698,7 @@ function Login({ onLogin }) {
 const INPUT_CLS =
   "mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100";
 
-function Settings({ settings, onSave, onClose }) {
+function Settings({ settings, me, onSave, onClose }) {
   const [apiKey, setApiKey] = useState(settings.apiKey);
   const [model, setModel] = useState(settings.model);
   const [summaryProvider, setSummaryProvider] = useState(settings.summaryProvider);
@@ -754,7 +755,10 @@ function Settings({ settings, onSave, onClose }) {
     }
   };
 
-  const save = () => {
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
+
+  const save = async () => {
     const next = {
       apiKey: apiKey.trim(),
       model,
@@ -764,7 +768,17 @@ function Settings({ settings, onSave, onClose }) {
       sttApiKey: sttApiKey.trim(),
       sttModel,
     };
-    localStorage.setItem("gemini_api_key", next.apiKey);
+    setSaving(true);
+    setSaveError(null);
+    try {
+      // Gemini 키는 계정별 서버 저장 (다른 기기·브라우저에서도 동일 계정이면 사용 가능)
+      await api("/api/me", { method: "PUT", body: JSON.stringify({ gemini_api_key: next.apiKey }) });
+    } catch (e) {
+      setSaveError("키 저장 실패: " + e.message);
+      setSaving(false);
+      return;
+    }
+    // 나머지 환경 설정(모델·로컬 LLM 등)은 이 브라우저에 저장
     localStorage.setItem("gemini_model", next.model);
     localStorage.setItem("summary_provider", next.summaryProvider);
     localStorage.setItem("local_base_url", next.localBaseUrl);
@@ -794,7 +808,17 @@ function Settings({ settings, onSave, onClose }) {
           className="mt-1 inline-block text-xs text-teal-700 hover:underline">
           → Google AI Studio에서 키 발급
         </a>
-        <p className="mt-1 text-xs text-slate-400">오디오 전사는 항상 Gemini를 사용하므로 이 키가 필요합니다.</p>
+        <p className="mt-1 text-xs text-slate-400">
+          키는 <b>내 계정에</b> 저장되어 다른 기기에서도 로그인하면 사용됩니다. 오디오 전사는 항상 Gemini를 사용합니다.
+        </p>
+        {me?.using_admin_key && (
+          <p className="mt-1 rounded-lg bg-teal-50 px-3 py-1.5 text-xs text-teal-700">
+            현재 <b>관리자의 API 키</b>를 사용 중입니다. 위에 본인 키를 입력하면 본인 키가 우선됩니다.
+          </p>
+        )}
+        {me?.can_use_admin_key && me?.has_own_key && (
+          <p className="mt-1 text-xs text-slate-400">관리자 키 사용이 허용된 계정입니다 — 본인 키를 비우면 관리자 키로 전환됩니다.</p>
+        )}
 
         {/* 실시간 모델 목록 상태 + 새로고침 */}
         <div className="mt-2 flex items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2">
@@ -879,12 +903,16 @@ function Settings({ settings, onSave, onClose }) {
           </p>
         </div>
 
+        {saveError && <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">⚠️ {saveError}</p>}
+
         <div className="mt-6 flex justify-end gap-2">
-          <button onClick={onClose} className="rounded-xl px-4 py-2 text-sm font-medium text-slate-500 hover:bg-slate-100">
+          <button onClick={onClose} disabled={saving}
+            className="rounded-xl px-4 py-2 text-sm font-medium text-slate-500 hover:bg-slate-100 disabled:opacity-40">
             취소
           </button>
-          <button onClick={save} className="rounded-xl bg-teal-700 px-4 py-2 text-sm font-semibold text-white hover:bg-teal-600">
-            저장
+          <button onClick={save} disabled={saving}
+            className="rounded-xl bg-teal-700 px-4 py-2 text-sm font-semibold text-white hover:bg-teal-600 disabled:opacity-40">
+            {saving ? "저장 중…" : "저장"}
           </button>
         </div>
       </div>
@@ -933,6 +961,157 @@ function TransPanel({ trans, onGoto, onDismiss }) {
           {trans.liveText}
         </pre>
       )}
+    </div>
+  );
+}
+
+/* ── 관리자: 회원 관리 ─────────────────────────────────────── */
+function AdminUsers({ onBack }) {
+  const [users, setUsers] = useState(null);
+  const [error, setError] = useState(null);
+  const load = () => api("/api/admin-users").then(setUsers).catch((e) => setError(e.message));
+  useEffect(() => {
+    load();
+  }, []);
+
+  const toggleKey = async (u) => {
+    try {
+      await api("/api/admin-users", {
+        method: "PATCH",
+        body: JSON.stringify({ userId: u.id, can_use_admin_key: !u.can_use_admin_key }),
+      });
+      load();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const remove = async (u) => {
+    if (!window.confirm(`${u.email} 회원을 삭제할까요?\n해당 회원의 회의록 ${u.meeting_count}개도 함께 삭제됩니다.`)) return;
+    try {
+      await api("/api/admin-users", { method: "DELETE", body: JSON.stringify({ userId: u.id }) });
+      load();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  return (
+    <div className="space-y-5">
+      <button onClick={onBack} className="text-sm font-medium text-teal-700 hover:underline">
+        ← 목록으로
+      </button>
+      <h2 className="text-xl font-bold text-slate-800">회원 관리</h2>
+      {error && <p className="rounded-lg bg-red-50 px-4 py-2 text-sm text-red-600">⚠️ {error}</p>}
+
+      {users === null ? (
+        <p className="py-10 text-center text-sm text-slate-400">불러오는 중…</p>
+      ) : (
+        <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white shadow-sm">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-slate-100 text-left text-xs uppercase tracking-wide text-slate-400">
+                <th className="px-4 py-3">이메일</th>
+                <th className="px-4 py-3">가입일</th>
+                <th className="px-4 py-3">회의록</th>
+                <th className="px-4 py-3">본인 키</th>
+                <th className="px-4 py-3">관리자 키 사용 허용</th>
+                <th className="px-4 py-3"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {users.map((u) => (
+                <tr key={u.id} className="border-b border-slate-50">
+                  <td className="px-4 py-3 text-slate-700">
+                    {u.email}
+                    {u.is_admin && (
+                      <span className="ml-2 rounded-full bg-teal-50 px-2 py-0.5 text-xs font-medium text-teal-700">관리자</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-slate-500">{fmtDate(u.created_at)}</td>
+                  <td className="px-4 py-3 text-slate-500">{u.meeting_count}개</td>
+                  <td className="px-4 py-3 text-slate-500">{u.has_key ? "✅" : "—"}</td>
+                  <td className="px-4 py-3">
+                    {u.is_admin ? (
+                      <span className="text-xs text-slate-400">본인 키</span>
+                    ) : (
+                      <label className="flex cursor-pointer items-center gap-2">
+                        <input type="checkbox" checked={u.can_use_admin_key} onChange={() => toggleKey(u)}
+                          className="size-4 accent-teal-700" />
+                        <span className="text-xs text-slate-500">{u.can_use_admin_key ? "허용됨" : "미허용"}</span>
+                      </label>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    {!u.is_admin && (
+                      <button onClick={() => remove(u)} title="회원 삭제" className="text-slate-400 hover:text-red-500">
+                        🗑
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <p className="text-xs text-slate-400">
+        "관리자 키 사용 허용"이 켜진 회원은 본인 키가 없을 때 관리자의 Gemini 키로 요약·전사를 사용할 수 있습니다.
+      </p>
+    </div>
+  );
+}
+
+/* ── 도움말: 기능 소개 팝업 ─────────────────────────────────── */
+function Help({ onClose }) {
+  const h = "text-sm font-semibold text-slate-800";
+  const p = "mt-1 text-sm leading-relaxed text-slate-600";
+  return (
+    <div className="fixed inset-0 z-10 flex items-center justify-center bg-slate-900/40 p-4" onClick={onClose}>
+      <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl bg-white p-6 shadow-xl"
+        onClick={(e) => e.stopPropagation()}>
+        <h2 className="text-lg font-bold text-slate-800">📝 Meeting Minutes 사용 안내</h2>
+
+        <section className="mt-5">
+          <h3 className={h}>기본 기능</h3>
+          <p className={p}>
+            회의 스크립트를 붙여넣거나, 오디오 파일 업로드 또는 <b>앱 내 녹음</b>(마이크/탭 오디오, 일시정지 가능)으로
+            회의 내용을 입력하면 AI가 <b>전사 → 3줄 요약·아젠다·액션 아이템</b>을 만들어줍니다. 결과는 미리보기로
+            확인 후 저장하고, 목록·검색(키워드/태그/날짜 범위)·액션 아이템 탭에서 관리합니다. 회의록은
+            나만 보기/전체 공개를 선택할 수 있고, 저장 후에도 ✏️ 수정으로 내용·액션 아이템을 편집할 수 있습니다.
+            AI 없이 <b>"요약 없이 저장"</b>도 가능합니다.
+          </p>
+        </section>
+
+        <section className="mt-5">
+          <h3 className={h}>파일·데이터 저장 위치</h3>
+          <p className={p}>
+            · <b>회의록(텍스트)</b>: 서버 데이터베이스에 계정별 저장 — 다른 기기에서도 로그인하면 보입니다.<br />
+            · <b>녹음 원본(오디오)</b>: 서버에 올라가지 않고 <b>이 브라우저의 로컬 저장소</b>("보관된 녹음")에만
+            있습니다. "💾 파일로 저장"을 누르면 다운로드 폴더에 저장되어 Finder/탐색기로 접근할 수 있습니다.<br />
+            · <b>Gemini API 키</b>: 내 계정에 암호화 저장.<br />
+            · <b>환경 설정</b>(모델 선택, 로컬 LLM 주소 등): 이 브라우저에만 저장.
+          </p>
+        </section>
+
+        <section className="mt-5">
+          <h3 className={h}>LLM 연결 방법</h3>
+          <p className={p}>
+            · <b>Gemini API</b>: ⚙️ 설정 → Google AI Studio에서 키 발급 → 붙여넣고 저장. 관리자가 허용한
+            회원은 본인 키 없이 <b>관리자 키</b>를 사용할 수 있습니다.<br />
+            · <b>로컬 LLM(요약)</b>: Ollama·LM Studio 등을 이 PC에서 실행 → ⚙️ 설정 → 요약 제공자
+            "로컬 LLM" → 서버 주소(예: LM Studio <code>http://localhost:1234/v1</code>) 입력 →
+            "🔄 로컬 모델 불러오기"로 모델 선택. 단, 오디오 전사는 항상 Gemini를 사용합니다.
+          </p>
+        </section>
+
+        <div className="mt-6 flex justify-end">
+          <button onClick={onClose}
+            className="rounded-xl bg-teal-700 px-4 py-2 text-sm font-semibold text-white hover:bg-teal-600">
+            닫기
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1160,6 +1339,25 @@ function NewMeeting({
     }
   };
 
+  // LLM 없이 원문 그대로 저장 — 요약·액션 아이템은 나중에 ✏️ 수정에서 추가
+  const saveRaw = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const meeting = await api("/api/meetings", {
+        method: "POST",
+        body: JSON.stringify({
+          title, text, visibility,
+          summary: [], agenda: [], action_items: [], tags: [],
+        }),
+      });
+      onDone(meeting.id);
+    } catch (e) {
+      setError(e.message);
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="space-y-5">
       <button onClick={onCancel} className="text-sm font-medium text-teal-700 hover:underline">
@@ -1344,13 +1542,22 @@ function NewMeeting({
       {error && <p className="rounded-lg bg-red-50 px-4 py-2 text-sm text-red-600">⚠️ {error}</p>}
 
       {!preview ? (
-        <div className="flex justify-end gap-3">
+        <div className="flex flex-wrap items-center justify-end gap-3">
           <button onClick={onCancel} className="rounded-xl px-4 py-2.5 text-sm font-medium text-slate-500 hover:bg-slate-100">
             취소
           </button>
+          {/* LLM 미연결이어도 원문 그대로 저장 가능 */}
+          <button
+            onClick={saveRaw}
+            disabled={saving || loading || !title.trim() || !text.trim()}
+            title="AI 요약 없이 입력한 내용을 그대로 저장합니다 (요약·액션 아이템은 나중에 ✏️ 수정에서 추가 가능)"
+            className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+          >
+            {saving ? "저장 중…" : "요약 없이 저장"}
+          </button>
           <button
             onClick={summarize}
-            disabled={loading || !title.trim() || !text.trim()}
+            disabled={loading || saving || !title.trim() || !text.trim()}
             className="rounded-xl bg-teal-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-teal-600 disabled:opacity-40"
           >
             {loading ? "AI 분석 중… (10~20초)" : "AI 요약 생성"}
@@ -1651,28 +1858,33 @@ function Detail({ id, onBack }) {
         )}
       </div>
 
-      <section className="rounded-2xl bg-slate-900 p-6 text-slate-100 shadow-sm">
-        <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-400">3줄 요약</h3>
-        <ol className="mt-3 space-y-2">
-          {m.summary.map((s, i) => (
-            <li key={i} className="flex gap-3 text-sm leading-relaxed">
-              <span className="font-bold text-slate-500">{i + 1}</span>{s}
-            </li>
-          ))}
-        </ol>
-      </section>
+      {/* 요약 없이 저장된 회의록은 빈 섹션을 숨김 (✏️ 수정에서 채울 수 있음) */}
+      {m.summary.length > 0 && (
+        <section className="rounded-2xl bg-slate-900 p-6 text-slate-100 shadow-sm">
+          <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-400">3줄 요약</h3>
+          <ol className="mt-3 space-y-2">
+            {m.summary.map((s, i) => (
+              <li key={i} className="flex gap-3 text-sm leading-relaxed">
+                <span className="font-bold text-slate-500">{i + 1}</span>{s}
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-        <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-400">주요 아젠다</h3>
-        <div className="mt-4 space-y-4">
-          {m.agenda.map((a, i) => (
-            <div key={i} className="border-l-2 border-teal-300 pl-4">
-              <h4 className="font-semibold text-slate-800">{a.topic}</h4>
-              <p className="mt-1 text-sm leading-relaxed text-slate-600">{a.discussion}</p>
-            </div>
-          ))}
-        </div>
-      </section>
+      {m.agenda.length > 0 && (
+        <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-400">주요 아젠다</h3>
+          <div className="mt-4 space-y-4">
+            {m.agenda.map((a, i) => (
+              <div key={i} className="border-l-2 border-teal-300 pl-4">
+                <h4 className="font-semibold text-slate-800">{a.topic}</h4>
+                <p className="mt-1 text-sm leading-relaxed text-slate-600">{a.discussion}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
         <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
@@ -1725,6 +1937,32 @@ export default function App() {
   const [settings, setSettings] = useState(loadSettings);
   const [showSettings, setShowSettings] = useState(false);
   const [authed, setAuthed] = useState(() => !!localStorage.getItem("auth_token"));
+  const [showHelp, setShowHelp] = useState(false);
+
+  // 내 계정 정보 + 사용자별 Gemini 키(서버 저장). 키는 본인 키 또는(허용 시) 관리자 키.
+  const [me, setMe] = useState(null);
+  const refreshMe = async () => {
+    try {
+      let m = await api("/api/me");
+      // 예전 버전이 브라우저에 남긴 키를 서버(계정별)로 1회 이전
+      const legacy = localStorage.getItem("gemini_api_key");
+      if (legacy) {
+        if (!m.has_own_key) {
+          await api("/api/me", { method: "PUT", body: JSON.stringify({ gemini_api_key: legacy }) });
+          m = await api("/api/me");
+        }
+        localStorage.removeItem("gemini_api_key");
+      }
+      setMe(m);
+      setSettings((p) => ({ ...p, apiKey: m.gemini_key }));
+    } catch {
+      /* 401은 api()가 처리, 그 외는 다음 기회에 */
+    }
+  };
+  useEffect(() => {
+    if (authed) refreshMe();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authed]);
   // 작성 중인 초안 + 전사 진행 상태를 App이 보유 → 화면을 이동해도 전사가 계속되고 목록에서도 보임
   const [draft, setDraft] = useState({ title: "", text: "" });
   const [trans, setTrans] = useState(IDLE_TRANS);
@@ -2056,6 +2294,8 @@ export default function App() {
     localStorage.removeItem("auth_token");
     localStorage.removeItem("auth_email");
     setAuthed(false);
+    setMe(null);
+    setSettings((p) => ({ ...p, apiKey: "" })); // 계정 키는 세션과 함께 정리
     setView({ name: "list" });
   };
 
@@ -2100,6 +2340,22 @@ export default function App() {
           >
             ⚙️ 설정
           </button>
+          <button
+            onClick={() => setShowHelp(true)}
+            title="기능 소개"
+            className="rounded-lg px-2.5 py-1.5 text-sm text-slate-500 hover:bg-slate-100"
+          >
+            ❓ 도움말
+          </button>
+          {me?.is_admin && (
+            <button
+              onClick={() => setView({ name: "admin" })}
+              title="회원 관리 (관리자)"
+              className="rounded-lg px-2.5 py-1.5 text-sm text-slate-500 hover:bg-slate-100"
+            >
+              👥 회원 관리
+            </button>
+          )}
           <span className="hidden text-xs text-slate-400 sm:inline">
             {localStorage.getItem("auth_email")}
           </span>
@@ -2170,11 +2426,21 @@ export default function App() {
           />
         )}
         {view.name === "detail" && <Detail id={view.id} onBack={() => setView({ name: "list" })} />}
+        {view.name === "admin" && <AdminUsers onBack={() => setView({ name: "list" })} />}
       </main>
 
       {showSettings && (
-        <Settings settings={settings} onSave={setSettings} onClose={() => setShowSettings(false)} />
+        <Settings
+          settings={settings}
+          me={me}
+          onSave={(next) => {
+            setSettings(next);
+            refreshMe(); // 키 변경 반영 (관리자 키 ↔ 본인 키 전환 상태 갱신)
+          }}
+          onClose={() => setShowSettings(false)}
+        />
       )}
+      {showHelp && <Help onClose={() => setShowHelp(false)} />}
     </div>
   );
 }

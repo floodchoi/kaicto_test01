@@ -2,11 +2,16 @@
 -- Neon(또는 아무 PostgreSQL) SQL 에디터에서 1회 실행
 
 CREATE TABLE users (
-  id            SERIAL PRIMARY KEY,
-  email         TEXT NOT NULL UNIQUE,   -- 소문자 정규화해 저장
-  password_hash TEXT NOT NULL,          -- scrypt "salt:hash"
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  id                SERIAL PRIMARY KEY,
+  email             TEXT NOT NULL UNIQUE,   -- 소문자 정규화해 저장
+  password_hash     TEXT NOT NULL,          -- scrypt "salt:hash"
+  is_admin          BOOLEAN NOT NULL DEFAULT false,
+  can_use_admin_key BOOLEAN NOT NULL DEFAULT false, -- 관리자 API 키 사용 허용
+  gemini_key_enc    TEXT,                   -- 사용자별 Gemini 키 (AES-GCM 암호화)
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- 초기 관리자는 floodchoi@gmail.com — 가입 시 코드에서 자동 지정.
+-- 이미 가입돼 있다면: UPDATE users SET is_admin = true WHERE email = 'floodchoi@gmail.com';
 
 CREATE TABLE meetings (
   id         SERIAL PRIMARY KEY,
@@ -41,5 +46,9 @@ CREATE TABLE action_items (
 -- ALTER TABLE meetings ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'private';
 -- ALTER TABLE meetings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ,
 --   ADD COLUMN IF NOT EXISTS updated_by INT REFERENCES users(id);
+-- ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT false,
+--   ADD COLUMN IF NOT EXISTS can_use_admin_key BOOLEAN NOT NULL DEFAULT false,
+--   ADD COLUMN IF NOT EXISTS gemini_key_enc TEXT;
+-- UPDATE users SET is_admin = true WHERE email = 'floodchoi@gmail.com';
 -- (기존 회의록은 user_id가 NULL이라 목록에 안 보임 — 계정 생성 후 원하는 계정에 배정:
 --  UPDATE meetings SET user_id = <내 user id> WHERE user_id IS NULL;)

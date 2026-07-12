@@ -1,4 +1,10 @@
-import { createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import {
+  createCipheriv, createDecipheriv, createHash, createHmac,
+  randomBytes, scryptSync, timingSafeEqual,
+} from "node:crypto";
+
+// 초기 관리자 — 이 이메일로 가입하면 자동으로 관리자 권한
+export const ADMIN_EMAIL = "floodchoi@gmail.com";
 
 // 이메일/비밀번호 인증. AUTH_SECRET(환경변수)은 토큰 서명 키 — 유출 시 전체 토큰 위조 가능하므로 비밀 유지.
 const SECRET = process.env.AUTH_SECRET ?? "";
@@ -33,6 +39,28 @@ const safeEqual = (a, b) => {
   const ba = Buffer.from(hmac("cmp:" + a));
   const bb = Buffer.from(hmac("cmp:" + b));
   return timingSafeEqual(ba, bb);
+};
+
+// ── 사용자 API 키 암호화 (AES-256-GCM, 키는 AUTH_SECRET 파생) ──
+// DB가 유출돼도 AUTH_SECRET 없이는 복호화 불가.
+const encKey = createHash("sha256").update("enckey:" + SECRET).digest();
+
+export const encryptSecret = (text) => {
+  const iv = randomBytes(12);
+  const c = createCipheriv("aes-256-gcm", encKey, iv);
+  const data = Buffer.concat([c.update(text, "utf8"), c.final()]);
+  return [iv, c.getAuthTag(), data].map((b) => b.toString("base64url")).join(".");
+};
+
+export const decryptSecret = (stored) => {
+  try {
+    const [iv, tag, data] = String(stored ?? "").split(".").map((x) => Buffer.from(x, "base64url"));
+    const d = createDecipheriv("aes-256-gcm", encKey, iv);
+    d.setAuthTag(tag);
+    return Buffer.concat([d.update(data), d.final()]).toString("utf8");
+  } catch {
+    return null;
+  }
 };
 
 // ── 가입 봇 방지용 챌린지 ─────────────────────────────────────

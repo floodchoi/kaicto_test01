@@ -7,6 +7,7 @@ import {
   issueChallenge,
   verifyChallenge,
   DUMMY_HASH,
+  ADMIN_EMAIL,
 } from "./_auth.js";
 
 // ponytail: 인스턴스 메모리 rate limit — 완화 장치. 강한 보호가 필요하면 Vercel WAF.
@@ -53,8 +54,8 @@ export default wrap(async function handler(req, res) {
     if (reason) return res.status(400).json({ error: reason });
 
     const [user] = await sql`
-      INSERT INTO users (email, password_hash)
-      VALUES (${email}, ${hashPassword(password)})
+      INSERT INTO users (email, password_hash, is_admin)
+      VALUES (${email}, ${hashPassword(password)}, ${email === ADMIN_EMAIL})
       ON CONFLICT (email) DO NOTHING
       RETURNING id`;
     if (!user) return res.status(409).json({ error: "이미 가입된 이메일입니다. 로그인해주세요." });
