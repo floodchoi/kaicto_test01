@@ -965,6 +965,127 @@ function TransPanel({ trans, onGoto, onDismiss }) {
   );
 }
 
+/* ── 프로젝트 선택 (filter: 목록·검색용 / assign: 회의록 지정용) ── */
+function ProjectSelect({ projects, value, onChange, mode = "filter", className = "" }) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      title="프로젝트"
+      className={
+        "rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-600 shadow-sm outline-none focus:border-teal-500 " +
+        className
+      }
+    >
+      {mode === "filter" ? (
+        <>
+          <option value="">전체 프로젝트</option>
+          <option value="none">미분류</option>
+        </>
+      ) : (
+        <option value="">프로젝트 없음</option>
+      )}
+      {projects.map((p) => (
+        <option key={p.id} value={String(p.id)}>
+          {p.is_shared ? "👥 " : "📁 "}{p.name}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+/* ── 프로젝트 관리 모달 ─────────────────────────────────────── */
+function ProjectManager({ me, projects, onChanged, onClose }) {
+  const [name, setName] = useState("");
+  const [shared, setShared] = useState(false);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const create = async () => {
+    if (!name.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api("/api/projects", { method: "POST", body: JSON.stringify({ name: name.trim(), shared }) });
+      setName("");
+      setShared(false);
+      onChanged();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (p) => {
+    if (!window.confirm(`"${p.name}" 프로젝트를 삭제할까요?\n소속 회의록은 삭제되지 않고 "미분류"가 됩니다.`)) return;
+    setError(null);
+    try {
+      await api("/api/projects", { method: "DELETE", body: JSON.stringify({ projectId: p.id }) });
+      onChanged();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-10 flex items-center justify-center bg-slate-900/40 p-4" onClick={onClose}>
+      <div className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-2xl bg-white p-6 shadow-xl"
+        onClick={(e) => e.stopPropagation()}>
+        <h2 className="text-lg font-bold text-slate-800">프로젝트 관리</h2>
+        <p className="mt-1 text-xs text-slate-500">
+          개인 프로젝트는 나만 사용합니다. 👥 공유 프로젝트(관리자 생성)는 모든 회원이 지정할 수 있습니다.
+        </p>
+
+        <div className="mt-4 flex gap-2">
+          <input value={name} onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && create()}
+            placeholder="새 프로젝트 이름"
+            className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100" />
+          <button onClick={create} disabled={busy || !name.trim()}
+            className="shrink-0 rounded-xl bg-teal-700 px-3 py-2 text-sm font-semibold text-white hover:bg-teal-600 disabled:opacity-40">
+            추가
+          </button>
+        </div>
+        {me?.is_admin && (
+          <label className="mt-2 flex cursor-pointer items-center gap-1.5 text-xs text-slate-500">
+            <input type="checkbox" checked={shared} onChange={(e) => setShared(e.target.checked)}
+              className="size-3.5 accent-teal-700" />
+            👥 공유 프로젝트로 만들기 (모든 회원이 사용 가능)
+          </label>
+        )}
+
+        {error && <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">⚠️ {error}</p>}
+
+        <ul className="mt-4 space-y-1.5">
+          {projects.length === 0 && <li className="text-sm text-slate-400">아직 프로젝트가 없습니다.</li>}
+          {projects.map((p) => (
+            <li key={p.id} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-slate-50">
+              <span className="min-w-0 flex-1 truncate text-slate-700">
+                {p.is_shared ? "👥 " : "📁 "}{p.name}
+                <span className="ml-2 text-xs text-slate-400">회의록 {p.meeting_count}개</span>
+              </span>
+              {(p.is_mine || (me?.is_admin && p.is_shared)) && (
+                <button onClick={() => remove(p)} title="프로젝트 삭제 (회의록은 미분류로)"
+                  className="text-slate-400 hover:text-red-500">
+                  🗑
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+
+        <div className="mt-5 flex justify-end">
+          <button onClick={onClose}
+            className="rounded-xl bg-slate-100 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-200">
+            닫기
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ── 관리자: 회원 관리 ─────────────────────────────────────── */
 function AdminUsers({ onBack }) {
   const [users, setUsers] = useState(null);
@@ -1117,7 +1238,7 @@ function Help({ onClose }) {
 }
 
 /* ── 대시보드: 회의록 리스트 + 검색(키워드·날짜 범위) ─────── */
-function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans }) {
+function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, projects, projectFilter, setProjectFilter, onManageProjects }) {
   const [meetings, setMeetings] = useState(null);
   const [q, setQ] = useState("");
   const [from, setFrom] = useState("");
@@ -1126,15 +1247,15 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans }) {
   useEffect(() => {
     const t = setTimeout(
       () =>
-        api(`/api/meetings?q=${encodeURIComponent(q)}&from=${from}&to=${to}`)
+        api(`/api/meetings?q=${encodeURIComponent(q)}&from=${from}&to=${to}&project=${projectFilter}`)
           .then(setMeetings)
           .catch(console.error),
       q ? 300 : 0,
     );
     return () => clearTimeout(t);
-  }, [q, from, to]);
+  }, [q, from, to, projectFilter]);
 
-  const hasFilter = q || from || to;
+  const hasFilter = q || from || to || projectFilter;
 
   return (
     <div className="space-y-6">
@@ -1153,6 +1274,11 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans }) {
         <span className="text-slate-400">~</span>
         <input type="date" value={to} onChange={(e) => setTo(e.target.value)} title="종료일"
           className="rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-600 shadow-sm outline-none focus:border-teal-500" />
+        <ProjectSelect projects={projects} value={projectFilter} onChange={setProjectFilter} />
+        <button onClick={onManageProjects} title="프로젝트 추가/삭제"
+          className="rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-500 shadow-sm hover:bg-slate-50">
+          📁 관리
+        </button>
         <button
           onClick={onNew}
           className="rounded-xl bg-teal-700 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-teal-600"
@@ -1186,6 +1312,11 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans }) {
                 </div>
                 <p className="mt-2 line-clamp-2 text-sm text-slate-500">{m.summary?.[0]}</p>
                 <div className="mt-3 flex flex-wrap gap-1.5">
+                  {m.project_name && (
+                    <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-600">
+                      📁 {m.project_name}
+                    </span>
+                  )}
                   {m.visibility === "workspace" && (
                     <span className="rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-700">
                       👥 공개{!m.is_owner && m.owner_email ? ` · ${m.owner_email}` : ""}
@@ -1203,7 +1334,7 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans }) {
 }
 
 /* ── 액션 아이템: 전체 목록 + 검색(키워드·날짜 범위) ───────── */
-function ActionItems({ onOpenMeeting }) {
+function ActionItems({ onOpenMeeting, projects, projectFilter, setProjectFilter }) {
   const [items, setItems] = useState(null);
   const [q, setQ] = useState("");
   const [from, setFrom] = useState("");
@@ -1212,13 +1343,13 @@ function ActionItems({ onOpenMeeting }) {
   useEffect(() => {
     const t = setTimeout(
       () =>
-        api(`/api/action-items?q=${encodeURIComponent(q)}&from=${from}&to=${to}`)
+        api(`/api/action-items?q=${encodeURIComponent(q)}&from=${from}&to=${to}&project=${projectFilter}`)
           .then(setItems)
           .catch(console.error),
       q ? 300 : 0,
     );
     return () => clearTimeout(t);
-  }, [q, from, to]);
+  }, [q, from, to, projectFilter]);
 
   const toggle = async (item) => {
     setItems((p) => p.map((a) => (a.id === item.id ? { ...a, done: !a.done } : a)));
@@ -1242,6 +1373,7 @@ function ActionItems({ onOpenMeeting }) {
         <span className="text-slate-400">~</span>
         <input type="date" value={to} onChange={(e) => setTo(e.target.value)} title="종료일"
           className="rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-600 shadow-sm outline-none focus:border-teal-500" />
+        <ProjectSelect projects={projects} value={projectFilter} onChange={setProjectFilter} />
       </div>
 
       {items === null ? (
@@ -1274,6 +1406,7 @@ function ActionItems({ onOpenMeeting }) {
                 className="ml-7 mt-1 text-xs text-teal-700 hover:underline"
               >
                 📝 {a.meeting_title} · {fmtDate(a.meeting_date)}
+                {a.project_name ? ` · 📁 ${a.project_name}` : ""}
               </button>
             </li>
           ))}
@@ -1287,6 +1420,7 @@ function ActionItems({ onOpenMeeting }) {
 function NewMeeting({
   settings, draft, setDraft, trans, audioFile, setAudioFile,
   rec, meter, canAppend, onRecStart, onRecPause, onRecResume, onRecStop, recsVersion, onRecsChanged, onUseRec,
+  projects,
   onTranscribe, onDismissTrans, onDone, onCancel, onOpenSettings,
 }) {
   // 이전 녹음이 있을 때 새 녹음 방식: "new"(대체) | "append"(이어붙임)
@@ -1295,6 +1429,7 @@ function NewMeeting({
   const setTitle = (v) => setDraft((p) => ({ ...p, title: v }));
   const setText = (v) => setDraft((p) => ({ ...p, text: v }));
   const [visibility, setVisibility] = useState("private");
+  const [projectId, setProjectId] = useState(""); // ""=프로젝트 없음
 
   // 변환 후 녹음 원본 삭제 옵션 (localStorage 유지)
   const [deleteAfter, setDeleteAfter] = useState(() => localStorage.getItem("rec_delete_after") === "1");
@@ -1330,7 +1465,11 @@ function NewMeeting({
     try {
       const meeting = await api("/api/meetings", {
         method: "POST",
-        body: JSON.stringify({ title, text, visibility, ...preview }),
+        body: JSON.stringify({
+          title, text, visibility,
+          project_id: projectId ? Number(projectId) : null,
+          ...preview,
+        }),
       });
       onDone(meeting.id);
     } catch (e) {
@@ -1348,6 +1487,7 @@ function NewMeeting({
         method: "POST",
         body: JSON.stringify({
           title, text, visibility,
+          project_id: projectId ? Number(projectId) : null,
           summary: [], agenda: [], action_items: [], tags: [],
         }),
       });
@@ -1539,6 +1679,21 @@ function NewMeeting({
         </button>
       </div>
 
+      {/* 저장 옵션: 프로젝트 + 공개 범위 (요약 저장·요약 없이 저장 공통) */}
+      <div className="flex flex-wrap items-center gap-3 rounded-xl bg-slate-100 px-4 py-2.5">
+        <label className="text-sm text-slate-600">프로젝트</label>
+        <ProjectSelect projects={projects} value={projectId} onChange={setProjectId} mode="assign" />
+        <label className="ml-auto text-sm text-slate-600">공개 범위</label>
+        <select
+          value={visibility}
+          onChange={(e) => setVisibility(e.target.value)}
+          className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-sm outline-none focus:border-teal-500"
+        >
+          <option value="private">🔒 나만 보기</option>
+          <option value="workspace">👥 전체 공개</option>
+        </select>
+      </div>
+
       {error && <p className="rounded-lg bg-red-50 px-4 py-2 text-sm text-red-600">⚠️ {error}</p>}
 
       {!preview ? (
@@ -1566,19 +1721,6 @@ function NewMeeting({
       ) : (
         <div className="space-y-4">
           <SummaryPreview data={preview} />
-
-          {/* 공개 범위: 나만 보기 vs 가입자 전체 공개 */}
-          <div className="flex items-center justify-between rounded-xl bg-slate-100 px-4 py-2.5">
-            <label className="text-sm text-slate-600">공개 범위</label>
-            <select
-              value={visibility}
-              onChange={(e) => setVisibility(e.target.value)}
-              className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-sm outline-none focus:border-teal-500"
-            >
-              <option value="private">🔒 나만 보기</option>
-              <option value="workspace">👥 전체 공개 (가입한 모든 사용자)</option>
-            </select>
-          </div>
 
           <div className="flex justify-end gap-3">
             <button
@@ -1660,7 +1802,8 @@ function SummaryPreview({ data }) {
 }
 
 /* ── 회의록 수정 (소유자 전용) ─────────────────────────────── */
-function EditMeeting({ m, onSaved, onCancel }) {
+function EditMeeting({ m, projects, onSaved, onCancel }) {
+  const [projectId, setProjectId] = useState(m.project_id ? String(m.project_id) : "");
   const [title, setTitle] = useState(m.title);
   const [text, setText] = useState(m.raw_text);
   const [summaryText, setSummaryText] = useState((m.summary ?? []).join("\n"));
@@ -1686,6 +1829,7 @@ function EditMeeting({ m, onSaved, onCancel }) {
         body: JSON.stringify({
           title,
           text,
+          project_id: projectId ? Number(projectId) : null,
           summary: summaryText.split("\n").map((s) => s.trim()).filter(Boolean),
           agenda: agenda.filter((a) => (a.topic ?? "").trim() || (a.discussion ?? "").trim()),
           tags: tagsText.split(",").map((s) => s.trim()).filter(Boolean),
@@ -1757,6 +1901,7 @@ function EditMeeting({ m, onSaved, onCancel }) {
       <div className="flex flex-wrap items-center gap-3">
         <input value={tagsText} onChange={(e) => setTagsText(e.target.value)}
           placeholder="태그 (쉼표로 구분)" className={box + " min-w-40 flex-1"} />
+        <ProjectSelect projects={projects} value={projectId} onChange={setProjectId} mode="assign" />
         <select value={visibility} onChange={(e) => setVisibility(e.target.value)}
           className="rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm outline-none focus:border-teal-500">
           <option value="private">🔒 나만 보기</option>
@@ -1791,7 +1936,7 @@ function EditMeeting({ m, onSaved, onCancel }) {
 }
 
 /* ── 회의록 상세: 요약 / 아젠다 / 액션 아이템 ─────────────── */
-function Detail({ id, onBack }) {
+function Detail({ id, onBack, projects }) {
   const [m, setM] = useState(null);
   const [showRaw, setShowRaw] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -1818,6 +1963,7 @@ function Detail({ id, onBack }) {
     return (
       <EditMeeting
         m={m}
+        projects={projects}
         onSaved={(updated) => { setM(updated); setEditing(false); }}
         onCancel={() => setEditing(false)}
       />
@@ -1843,6 +1989,11 @@ function Detail({ id, onBack }) {
         <h2 className="text-2xl font-bold text-slate-800">{m.title}</h2>
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <time className="text-sm text-slate-400">{fmtDate(m.created_at)}</time>
+          {m.project_name && (
+            <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-600">
+              📁 {m.project_name}
+            </span>
+          )}
           {m.visibility === "workspace" && (
             <span className="rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-700">
               👥 공개{!m.is_owner && m.owner_email ? ` · 작성자 ${m.owner_email}` : ""}
@@ -1961,6 +2112,16 @@ export default function App() {
   };
   useEffect(() => {
     if (authed) refreshMe();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authed]);
+
+  // 프로젝트 목록 (내 것 + 공유) — 필터는 회의록/액션아이템 탭이 공유
+  const [projects, setProjects] = useState([]);
+  const refreshProjects = () => api("/api/projects").then(setProjects).catch(() => {});
+  const [projectFilter, setProjectFilter] = useState(""); // ""=전체, "none"=미분류, "숫자"=프로젝트
+  const [showProjects, setShowProjects] = useState(false);
+  useEffect(() => {
+    if (authed) refreshProjects();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authed]);
   // 작성 중인 초안 + 전사 진행 상태를 App이 보유 → 화면을 이동해도 전사가 계속되고 목록에서도 보임
@@ -2395,10 +2556,19 @@ export default function App() {
             trans={trans}
             onGotoNew={() => setView({ name: "new" })}
             onDismissTrans={() => setTrans(IDLE_TRANS)}
+            projects={projects}
+            projectFilter={projectFilter}
+            setProjectFilter={setProjectFilter}
+            onManageProjects={() => setShowProjects(true)}
           />
         )}
         {view.name === "actions" && (
-          <ActionItems onOpenMeeting={(id) => setView({ name: "detail", id })} />
+          <ActionItems
+            onOpenMeeting={(id) => setView({ name: "detail", id })}
+            projects={projects}
+            projectFilter={projectFilter}
+            setProjectFilter={setProjectFilter}
+          />
         )}
         {view.name === "new" && (
           <NewMeeting
@@ -2418,6 +2588,7 @@ export default function App() {
             recsVersion={recsVersion}
             onRecsChanged={() => setRecsVersion((v) => v + 1)}
             onUseRec={useSavedRec}
+            projects={projects}
             onTranscribe={startTranscription}
             onDismissTrans={() => setTrans(IDLE_TRANS)}
             onDone={finishSave}
@@ -2425,7 +2596,9 @@ export default function App() {
             onOpenSettings={() => setShowSettings(true)}
           />
         )}
-        {view.name === "detail" && <Detail id={view.id} onBack={() => setView({ name: "list" })} />}
+        {view.name === "detail" && (
+          <Detail id={view.id} projects={projects} onBack={() => setView({ name: "list" })} />
+        )}
         {view.name === "admin" && <AdminUsers onBack={() => setView({ name: "list" })} />}
       </main>
 
@@ -2441,6 +2614,14 @@ export default function App() {
         />
       )}
       {showHelp && <Help onClose={() => setShowHelp(false)} />}
+      {showProjects && (
+        <ProjectManager
+          me={me}
+          projects={projects}
+          onChanged={refreshProjects}
+          onClose={() => setShowProjects(false)}
+        />
+      )}
     </div>
   );
 }

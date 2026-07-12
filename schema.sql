@@ -13,9 +13,18 @@ CREATE TABLE users (
 -- 초기 관리자는 floodchoi@gmail.com — 가입 시 코드에서 자동 지정.
 -- 이미 가입돼 있다면: UPDATE users SET is_admin = true WHERE email = 'floodchoi@gmail.com';
 
+CREATE TABLE projects (
+  id         SERIAL PRIMARY KEY,
+  name       TEXT NOT NULL,
+  owner_id   INT REFERENCES users(id) ON DELETE CASCADE, -- 개인 프로젝트 소유자
+  is_shared  BOOLEAN NOT NULL DEFAULT false,             -- 관리자가 만든 공유 프로젝트 (전체 사용 가능)
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE meetings (
   id         SERIAL PRIMARY KEY,
   user_id    INT REFERENCES users(id) ON DELETE CASCADE,
+  project_id INT REFERENCES projects(id) ON DELETE SET NULL, -- 프로젝트 분류 (없으면 NULL)
   visibility TEXT NOT NULL DEFAULT 'private',  -- 'private'(나만) | 'workspace'(가입자 전체)
   title      TEXT NOT NULL,
   raw_text   TEXT NOT NULL,              -- 회의 원문 스크립트
@@ -50,5 +59,9 @@ CREATE TABLE action_items (
 --   ADD COLUMN IF NOT EXISTS can_use_admin_key BOOLEAN NOT NULL DEFAULT false,
 --   ADD COLUMN IF NOT EXISTS gemini_key_enc TEXT;
 -- UPDATE users SET is_admin = true WHERE email = 'floodchoi@gmail.com';
+-- CREATE TABLE IF NOT EXISTS projects ( id SERIAL PRIMARY KEY, name TEXT NOT NULL,
+--   owner_id INT REFERENCES users(id) ON DELETE CASCADE, is_shared BOOLEAN NOT NULL DEFAULT false,
+--   created_at TIMESTAMPTZ NOT NULL DEFAULT now() );
+-- ALTER TABLE meetings ADD COLUMN IF NOT EXISTS project_id INT REFERENCES projects(id) ON DELETE SET NULL;
 -- (기존 회의록은 user_id가 NULL이라 목록에 안 보임 — 계정 생성 후 원하는 계정에 배정:
 --  UPDATE meetings SET user_id = <내 user id> WHERE user_id IS NULL;)
