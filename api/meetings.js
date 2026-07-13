@@ -1,6 +1,6 @@
 import { sql } from "./_db.js";
 import { wrap } from "./_wrap.js";
-import { requireAuth } from "./_auth.js";
+import { requireAuth, encryptText } from "./_auth.js";
 
 const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
 
@@ -28,10 +28,12 @@ export default wrap(async function handler(req, res) {
     const vis = visibility === "workspace" ? "workspace" : "private";
     const projectId = await resolveProjectId(userId, project_id); // 권한 없는 프로젝트는 무시(NULL)
 
+    // 원문은 암호화 저장 — DB가 유출되거나 콘솔에서 직접 조회해도 내용을 볼 수 없음
     const [meeting] = await sql`
       INSERT INTO meetings (user_id, project_id, title, raw_text, summary, agenda, tags, visibility)
-      VALUES (${userId}, ${projectId}, ${title}, ${text}, ${summary ?? []}, ${sql.json(agenda ?? [])}, ${tags ?? []}, ${vis})
+      VALUES (${userId}, ${projectId}, ${title}, ${encryptText(text)}, ${summary ?? []}, ${sql.json(agenda ?? [])}, ${tags ?? []}, ${vis})
       RETURNING *`;
+    meeting.raw_text = text; // 응답은 평문으로
 
     const items = [];
     for (const it of action_items ?? []) {
@@ -60,7 +62,7 @@ export default wrap(async function handler(req, res) {
     LEFT JOIN users u ON u.id = m.user_id
     LEFT JOIN projects p ON p.id = m.project_id
     WHERE (m.user_id = ${userId} OR m.visibility = 'workspace')
-    ${q ? sql`AND (m.title ILIKE ${"%" + q + "%"} OR m.raw_text ILIKE ${"%" + q + "%"} OR ${q} = ANY(m.tags))` : sql``}
+    ${q ? sql`AND (m.title ILIKE ${"%" + q + "%"} OR array_to_string(m.summary, ' ') ILIKE ${"%" + q + "%"} OR ${q} = ANY(m.tags))` : sql``}
     ${isDate(from) ? sql`AND m.created_at >= ${from}::date` : sql``}
     ${isDate(to) ? sql`AND m.created_at < ${to}::date + 1` : sql``}
     ${project === "none" ? sql`AND m.project_id IS NULL` : /^\d+$/.test(project) ? sql`AND m.project_id = ${Number(project)}` : sql``}

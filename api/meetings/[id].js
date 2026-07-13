@@ -1,6 +1,6 @@
 import { sql } from "../_db.js";
 import { wrap } from "../_wrap.js";
-import { requireAuth } from "../_auth.js";
+import { requireAuth, encryptText, decryptText } from "../_auth.js";
 import { resolveProjectId } from "../meetings.js";
 
 export default wrap(async function handler(req, res) {
@@ -21,6 +21,7 @@ export default wrap(async function handler(req, res) {
       LEFT JOIN projects p ON p.id = m.project_id
       WHERE m.id = ${id} AND (m.user_id = ${userId} OR m.visibility = 'workspace')`;
     if (!meeting) return res.status(404).json({ error: "not found" });
+    meeting.raw_text = decryptText(meeting.raw_text); // 열람 권한 확인 후에만 복호화
     const items = await sql`
       SELECT * FROM action_items WHERE meeting_id = ${id} ORDER BY id`;
     return res.status(200).json({ ...meeting, action_items: items });
@@ -39,13 +40,14 @@ export default wrap(async function handler(req, res) {
 
     const [meeting] = await sql`
       UPDATE meetings SET
-        title = ${title}, raw_text = ${text}, summary = ${summary ?? []},
+        title = ${title}, raw_text = ${encryptText(text)}, summary = ${summary ?? []},
         agenda = ${sql.json(agenda ?? [])}, tags = ${tags ?? []}, visibility = ${vis},
         project_id = ${projectId},
         updated_at = now(), updated_by = ${userId}
       WHERE id = ${id} AND user_id = ${userId}
       RETURNING *`;
     if (!meeting) return res.status(404).json({ error: "not found" });
+    meeting.raw_text = text; // 응답은 평문으로
 
     await sql`DELETE FROM action_items WHERE meeting_id = ${id}`;
     const items = [];

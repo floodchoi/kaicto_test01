@@ -63,6 +63,19 @@ export const decryptSecret = (stored) => {
   }
 };
 
+// ── 회의록 원문 암호화 저장 ──────────────────────────────────
+// "enc:" 접두사로 암호문/기존 평문을 구분 — 마이그레이션 전 데이터도 그대로 읽힘.
+export const encryptText = (text) => "enc:" + encryptSecret(text);
+
+export const decryptText = (stored) => {
+  const v = String(stored ?? "");
+  if (!v.startsWith("enc:")) return v; // 암호화 도입 전 평문
+  return (
+    decryptSecret(v.slice(4)) ??
+    "[복호화 실패 — 서버 AUTH_SECRET이 저장 당시와 다릅니다. 원래 값으로 되돌리면 다시 읽을 수 있습니다.]"
+  );
+};
+
 // ── 가입 봇 방지용 챌린지 ─────────────────────────────────────
 // 폼을 열 때 발급받아 최소 3초 뒤에만 제출 가능 (자동 프로그램의 즉시 제출 차단).
 // 무상태 HMAC 서명이라 DB 불필요.
