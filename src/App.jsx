@@ -1123,6 +1123,46 @@ function AdminUsers({ onBack }) {
     load();
   }, []);
 
+  // 초대 코드 관리
+  const [codes, setCodes] = useState([]);
+  const [newCode, setNewCode] = useState("");
+  const [newMax, setNewMax] = useState(10);
+  const [copied, setCopied] = useState(null);
+  const loadCodes = () => api("/api/invite-codes").then(setCodes).catch((e) => setError(e.message));
+  useEffect(() => {
+    loadCodes();
+  }, []);
+
+  const createCode = async () => {
+    try {
+      await api("/api/invite-codes", {
+        method: "POST",
+        body: JSON.stringify({ code: newCode, max_uses: Number(newMax) }),
+      });
+      setNewCode("");
+      loadCodes();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const removeCode = async (c) => {
+    if (!window.confirm(`초대 코드 "${c.code}"를 삭제할까요?\n이미 가입한 회원에는 영향이 없습니다.`)) return;
+    try {
+      await api("/api/invite-codes", { method: "DELETE", body: JSON.stringify({ id: c.id }) });
+      loadCodes();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const copyCode = (c) => {
+    navigator.clipboard?.writeText(c.code).then(() => {
+      setCopied(c.id);
+      setTimeout(() => setCopied(null), 1500);
+    });
+  };
+
   const toggleKey = async (u) => {
     try {
       await api("/api/admin-users", {
@@ -1230,6 +1270,56 @@ function AdminUsers({ onBack }) {
       <p className="text-xs text-slate-400">
         "관리자 키 사용 허용"이 켜진 회원은 본인 키가 없을 때 관리자의 Gemini 키로 요약·전사를 사용할 수 있습니다.
       </p>
+
+      {/* 초대 코드 관리 */}
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <h3 className="text-sm font-semibold text-slate-800">초대 코드</h3>
+        <p className="mt-1 text-xs text-slate-500">
+          코드를 아는 사람은 가입 즉시 사용할 수 있습니다. 코드별로 최대 사용 횟수를 정할 수 있고, 소진되면 더 이상 사용되지 않습니다.
+        </p>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <input value={newCode} onChange={(e) => setNewCode(e.target.value)}
+            placeholder="코드 (비우면 자동 생성)"
+            className="min-w-40 flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100" />
+          <label className="flex items-center gap-1.5 text-xs text-slate-500">
+            최대
+            <input type="number" min={1} max={10000} value={newMax}
+              onChange={(e) => setNewMax(e.target.value)}
+              className="w-20 rounded-xl border border-slate-200 px-2 py-2 text-sm outline-none focus:border-teal-500" />
+            회
+          </label>
+          <button onClick={createCode}
+            className="rounded-xl bg-teal-700 px-3 py-2 text-sm font-semibold text-white hover:bg-teal-600">
+            코드 추가
+          </button>
+        </div>
+
+        <ul className="mt-3 space-y-1.5">
+          {codes.length === 0 && <li className="text-sm text-slate-400">등록된 초대 코드가 없습니다 — 코드 없이 가입하면 승인 대기가 됩니다.</li>}
+          {codes.map((c) => {
+            const exhausted = c.used_count >= c.max_uses;
+            return (
+              <li key={c.id} className="flex flex-wrap items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-slate-50">
+                <code className={`rounded bg-slate-100 px-2 py-0.5 font-mono text-xs ${exhausted ? "text-slate-400 line-through" : "text-slate-700"}`}>
+                  {c.code}
+                </code>
+                <span className={`text-xs ${exhausted ? "font-medium text-amber-600" : "text-slate-500"}`}>
+                  {c.used_count}/{c.max_uses}회 사용{exhausted ? " · 소진됨" : ""}
+                </span>
+                <span className="ml-auto flex items-center gap-2">
+                  <button onClick={() => copyCode(c)} className="text-xs font-medium text-teal-700 hover:underline">
+                    {copied === c.id ? "복사됨 ✓" : "📋 복사"}
+                  </button>
+                  <button onClick={() => removeCode(c)} title="코드 삭제" className="text-slate-400 hover:text-red-500">
+                    🗑
+                  </button>
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      </section>
     </div>
   );
 }

@@ -4,6 +4,7 @@ import http from "node:http";
 import auth from "./api/auth.js";
 import me from "./api/me.js";
 import adminUsers from "./api/admin-users.js";
+import inviteCodes from "./api/invite-codes.js";
 import projects from "./api/projects.js";
 import meetings from "./api/meetings.js";
 import actionItems from "./api/action-items.js";
@@ -26,6 +27,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === "/api/auth") await auth(req, res);
     else if (url.pathname === "/api/me") await me(req, res);
     else if (url.pathname === "/api/admin-users") await adminUsers(req, res);
+    else if (url.pathname === "/api/invite-codes") await inviteCodes(req, res);
     else if (url.pathname === "/api/projects") await projects(req, res);
     else if (url.pathname === "/api/action-items") await actionItems(req, res);
     else if (url.pathname === "/api/meetings") await meetings(req, res);

@@ -8,7 +8,6 @@ import {
   verifyChallenge,
   DUMMY_HASH,
   ADMIN_EMAIL,
-  safeEqual,
 } from "./_auth.js";
 
 // ponytail: 인스턴스 메모리 rate limit — 완화 장치. 강한 보호가 필요하면 Vercel WAF.
@@ -54,21 +53,41 @@ export default wrap(async function handler(req, res) {
     const reason = verifyChallenge(challenge);
     if (reason) return res.status(400).json({ error: reason });
 
-    // 초대 코드: 맞으면 즉시 사용 가능, 비우면 관리자 승인 대기, 틀리면 가입 거부
+    // 초대 코드: 유효하면 즉시 사용 가능, 비우면 관리자 승인 대기, 틀리거나 소진되면 가입 거부.
+    // 코드는 DB(invite_codes)에서 관리 — 여러 개 + 코드별 최대 사용 횟수.
     const code = String(invite ?? "").trim();
-    const hasValidInvite = !!process.env.INVITE_CODE && !!code && safeEqual(code, process.env.INVITE_CODE);
-    if (code && !hasValidInvite)
-      return res.status(400).json({ error: "초대 코드가 올바르지 않습니다. 코드 없이 가입하면 관리자 승인 후 이용할 수 있습니다." });
+    let usedCodeId = null;
+    if (code) {
+      // 남은 횟수가 있을 때만 원자적으로 차감 (동시 가입 경쟁에도 초과 사용 불가)
+      const [row] = await sql`
+        UPDATE invite_codes SET used_count = used_count + 1
+        WHERE code = ${code} AND used_count < max_uses
+        RETURNING id`;
+      if (!row) {
+        const [exists] = await sql`SELECT 1 FROM invite_codes WHERE code = ${code}`;
+        return res.status(400).json({
+          error: exists
+            ? "이 초대 코드는 사용 횟수가 모두 소진되었습니다. 코드 없이 가입하면 관리자 승인 후 이용할 수 있습니다."
+            : "초대 코드가 올바르지 않습니다. 코드 없이 가입하면 관리자 승인 후 이용할 수 있습니다.",
+        });
+      }
+      usedCodeId = row.id;
+    }
 
     const isAdmin = email === ADMIN_EMAIL;
-    const approved = isAdmin || hasValidInvite;
+    const approved = isAdmin || !!usedCodeId;
 
     const [user] = await sql`
       INSERT INTO users (email, password_hash, is_admin, approved)
       VALUES (${email}, ${hashPassword(password)}, ${isAdmin}, ${approved})
       ON CONFLICT (email) DO NOTHING
       RETURNING id`;
-    if (!user) return res.status(409).json({ error: "이미 가입된 이메일입니다. 로그인해주세요." });
+    if (!user) {
+      // 중복 이메일로 가입 실패 — 차감했던 코드 사용 횟수 반환
+      if (usedCodeId)
+        await sql`UPDATE invite_codes SET used_count = used_count - 1 WHERE id = ${usedCodeId}`;
+      return res.status(409).json({ error: "이미 가입된 이메일입니다. 로그인해주세요." });
+    }
 
     if (!approved)
       return res.status(200).json({
