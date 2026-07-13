@@ -15,19 +15,22 @@ export default wrap(async function handler(req, res) {
 
   if (req.method === "GET") {
     const rows = await sql`
-      SELECT u.id, u.email, u.is_admin, u.can_use_admin_key, u.created_at,
+      SELECT u.id, u.email, u.is_admin, u.approved, u.can_use_admin_key, u.created_at,
              (u.gemini_key_enc IS NOT NULL) AS has_key,
              (SELECT count(*)::int FROM meetings m WHERE m.user_id = u.id) AS meeting_count
-      FROM users u ORDER BY u.id`;
+      FROM users u ORDER BY u.approved ASC, u.id`;
     return res.status(200).json(rows);
   }
 
+  // { userId, approved? , can_use_admin_key? } — 준 필드만 변경
   if (req.method === "PATCH") {
-    const { userId: targetId, can_use_admin_key } = req.body ?? {};
+    const { userId: targetId, can_use_admin_key, approved } = req.body ?? {};
     const [row] = await sql`
-      UPDATE users SET can_use_admin_key = ${!!can_use_admin_key}
+      UPDATE users SET
+        can_use_admin_key = COALESCE(${can_use_admin_key ?? null}, can_use_admin_key),
+        approved          = COALESCE(${approved ?? null}, approved)
       WHERE id = ${Number(targetId)} AND is_admin = false
-      RETURNING id, email, can_use_admin_key`;
+      RETURNING id, email, approved, can_use_admin_key`;
     if (!row) return res.status(404).json({ error: "대상 회원을 찾을 수 없습니다 (관리자는 변경 불가)." });
     return res.status(200).json(row);
   }

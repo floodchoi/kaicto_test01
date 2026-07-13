@@ -34,8 +34,8 @@ export const issueToken = (userId) => {
   return `${userId}.${exp}.${hmac(`${userId}.${exp}`)}`;
 };
 
-// 상수시간 문자열 비교 (해시로 길이 정규화)
-const safeEqual = (a, b) => {
+// 상수시간 문자열 비교 (해시로 길이 정규화) — 초대 코드 비교 등에 사용
+export const safeEqual = (a, b) => {
   const ba = Buffer.from(hmac("cmp:" + a));
   const bb = Buffer.from(hmac("cmp:" + b));
   return timingSafeEqual(ba, bb);

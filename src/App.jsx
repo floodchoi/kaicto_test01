@@ -598,8 +598,10 @@ function Login({ onLogin }) {
   const [mode, setMode] = useState("login"); // "login" | "signup"
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [invite, setInvite] = useState(""); // 초대 코드 (비우면 관리자 승인 대기)
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [notice, setNotice] = useState(null); // 승인 대기 안내 등
   // 봇 방지: 가입 모드 진입 시 서버 챌린지 발급(최소 3초 뒤 제출 가능) + 허니팟 필드
   const [challenge, setChallenge] = useState(null);
   const [website, setWebsite] = useState(""); // 허니팟 — 사람은 볼 수 없음, 채워지면 봇
@@ -612,13 +614,21 @@ function Login({ onLogin }) {
     e.preventDefault();
     setLoading(true);
     setError(null);
+    setNotice(null);
     try {
-      const { token, email: savedEmail } = await api("/api/auth", {
+      const resp = await api("/api/auth", {
         method: "POST",
-        body: JSON.stringify({ action: mode, email, password, challenge, website }),
+        body: JSON.stringify({ action: mode, email, password, challenge, website, invite }),
       });
-      localStorage.setItem("auth_token", token);
-      localStorage.setItem("auth_email", savedEmail);
+      if (resp.pending) {
+        // 초대 코드 없이 가입 → 승인 대기
+        setMode("login");
+        setNotice(resp.message ?? "가입이 접수되었습니다. 관리자 승인 후 로그인할 수 있습니다.");
+        setLoading(false);
+        return;
+      }
+      localStorage.setItem("auth_token", resp.token);
+      localStorage.setItem("auth_email", resp.email);
       onLogin();
     } catch (err) {
       setError(err.message);
@@ -660,6 +670,23 @@ function Login({ onLogin }) {
           className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
         />
 
+        {isSignup && (
+          <>
+            <label className="mt-4 block text-sm font-medium text-slate-700">초대 코드 (선택)</label>
+            <input
+              type="text"
+              value={invite}
+              onChange={(e) => setInvite(e.target.value)}
+              placeholder="코드가 있으면 즉시 사용 가능"
+              autoComplete="off"
+              className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+            />
+            <p className="mt-1 text-xs text-slate-400">
+              초대 코드 없이 가입하면 관리자 승인 후 로그인할 수 있습니다.
+            </p>
+          </>
+        )}
+
         {/* 허니팟 (봇 방지) — 화면에 보이지 않는 필드. 자동 프로그램이 채우면 가입 거부 */}
         <input
           type="text"
@@ -672,6 +699,7 @@ function Login({ onLogin }) {
           aria-hidden="true"
         />
 
+        {notice && <p className="mt-3 rounded-lg bg-teal-50 px-3 py-2 text-sm text-teal-700">✅ {notice}</p>}
         {error && <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">⚠️ {error}</p>}
 
         <button
@@ -1107,6 +1135,18 @@ function AdminUsers({ onBack }) {
     }
   };
 
+  const approve = async (u) => {
+    try {
+      await api("/api/admin-users", {
+        method: "PATCH",
+        body: JSON.stringify({ userId: u.id, approved: true }),
+      });
+      load();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
   const remove = async (u) => {
     if (!window.confirm(`${u.email} 회원을 삭제할까요?\n해당 회원의 회의록 ${u.meeting_count}개도 함께 삭제됩니다.`)) return;
     try {
@@ -1134,6 +1174,7 @@ function AdminUsers({ onBack }) {
               <tr className="border-b border-slate-100 text-left text-xs uppercase tracking-wide text-slate-400">
                 <th className="px-4 py-3">이메일</th>
                 <th className="px-4 py-3">가입일</th>
+                <th className="px-4 py-3">승인</th>
                 <th className="px-4 py-3">회의록</th>
                 <th className="px-4 py-3">본인 키</th>
                 <th className="px-4 py-3">관리자 키 사용 허용</th>
@@ -1150,6 +1191,16 @@ function AdminUsers({ onBack }) {
                     )}
                   </td>
                   <td className="px-4 py-3 text-slate-500">{fmtDate(u.created_at)}</td>
+                  <td className="px-4 py-3">
+                    {u.is_admin || u.approved ? (
+                      <span className="text-slate-500">✅</span>
+                    ) : (
+                      <button onClick={() => approve(u)}
+                        className="rounded-lg bg-teal-700 px-2.5 py-1 text-xs font-semibold text-white hover:bg-teal-600">
+                        승인
+                      </button>
+                    )}
+                  </td>
                   <td className="px-4 py-3 text-slate-500">{u.meeting_count}개</td>
                   <td className="px-4 py-3 text-slate-500">{u.has_key ? "✅" : "—"}</td>
                   <td className="px-4 py-3">

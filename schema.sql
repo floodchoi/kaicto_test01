@@ -6,6 +6,7 @@ CREATE TABLE users (
   email             TEXT NOT NULL UNIQUE,   -- 소문자 정규화해 저장
   password_hash     TEXT NOT NULL,          -- scrypt "salt:hash"
   is_admin          BOOLEAN NOT NULL DEFAULT false,
+  approved          BOOLEAN NOT NULL DEFAULT false, -- 초대 코드 가입 or 관리자 승인 시 true
   can_use_admin_key BOOLEAN NOT NULL DEFAULT false, -- 관리자 API 키 사용 허용
   gemini_key_enc    TEXT,                   -- 사용자별 Gemini 키 (AES-GCM 암호화)
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -63,5 +64,7 @@ CREATE TABLE action_items (
 --   owner_id INT REFERENCES users(id) ON DELETE CASCADE, is_shared BOOLEAN NOT NULL DEFAULT false,
 --   created_at TIMESTAMPTZ NOT NULL DEFAULT now() );
 -- ALTER TABLE meetings ADD COLUMN IF NOT EXISTS project_id INT REFERENCES projects(id) ON DELETE SET NULL;
+-- ALTER TABLE users ADD COLUMN IF NOT EXISTS approved BOOLEAN NOT NULL DEFAULT false;
+-- UPDATE users SET approved = true;  -- 기존 회원은 승인 상태 유지
 -- (기존 회의록은 user_id가 NULL이라 목록에 안 보임 — 계정 생성 후 원하는 계정에 배정:
 --  UPDATE meetings SET user_id = <내 user id> WHERE user_id IS NULL;)

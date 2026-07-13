@@ -8,6 +8,7 @@ import {
   verifyChallenge,
   DUMMY_HASH,
   ADMIN_EMAIL,
+  safeEqual,
 } from "./_auth.js";
 
 // ponytail: 인스턴스 메모리 rate limit — 완화 장치. 강한 보호가 필요하면 Vercel WAF.
@@ -39,7 +40,7 @@ export default wrap(async function handler(req, res) {
   if (rateLimited(ip))
     return res.status(429).json({ error: "요청이 너무 많습니다. 잠시 후 다시 시도해주세요." });
 
-  const { action, email: rawEmail, password, challenge, website } = req.body ?? {};
+  const { action, email: rawEmail, password, challenge, website, invite } = req.body ?? {};
   const email = String(rawEmail ?? "").trim().toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254)
     return res.status(400).json({ error: "올바른 이메일 주소를 입력해주세요." });
@@ -53,21 +54,38 @@ export default wrap(async function handler(req, res) {
     const reason = verifyChallenge(challenge);
     if (reason) return res.status(400).json({ error: reason });
 
+    // 초대 코드: 맞으면 즉시 사용 가능, 비우면 관리자 승인 대기, 틀리면 가입 거부
+    const code = String(invite ?? "").trim();
+    const hasValidInvite = !!process.env.INVITE_CODE && !!code && safeEqual(code, process.env.INVITE_CODE);
+    if (code && !hasValidInvite)
+      return res.status(400).json({ error: "초대 코드가 올바르지 않습니다. 코드 없이 가입하면 관리자 승인 후 이용할 수 있습니다." });
+
+    const isAdmin = email === ADMIN_EMAIL;
+    const approved = isAdmin || hasValidInvite;
+
     const [user] = await sql`
-      INSERT INTO users (email, password_hash, is_admin)
-      VALUES (${email}, ${hashPassword(password)}, ${email === ADMIN_EMAIL})
+      INSERT INTO users (email, password_hash, is_admin, approved)
+      VALUES (${email}, ${hashPassword(password)}, ${isAdmin}, ${approved})
       ON CONFLICT (email) DO NOTHING
       RETURNING id`;
     if (!user) return res.status(409).json({ error: "이미 가입된 이메일입니다. 로그인해주세요." });
+
+    if (!approved)
+      return res.status(200).json({
+        pending: true,
+        message: "가입이 접수되었습니다. 관리자 승인 후 로그인할 수 있습니다.",
+      });
     return res.status(200).json({ token: issueToken(user.id), email });
   }
 
   if (action === "login") {
-    const [user] = await sql`SELECT id, password_hash FROM users WHERE email = ${email}`;
+    const [user] = await sql`SELECT id, password_hash, approved FROM users WHERE email = ${email}`;
     // 미가입 이메일도 더미 해시를 검증해 응답 시간 차이(계정 존재 유추)를 줄인다
     const ok = verifyPassword(password, user?.password_hash ?? DUMMY_HASH);
     if (!user || !ok)
       return res.status(401).json({ error: "이메일 또는 비밀번호가 올바르지 않습니다." });
+    if (!user.approved)
+      return res.status(403).json({ error: "관리자 승인 대기 중입니다. 승인이 완료되면 로그인할 수 있습니다." });
     return res.status(200).json({ token: issueToken(user.id), email });
   }
 
