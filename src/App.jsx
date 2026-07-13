@@ -2324,12 +2324,70 @@ function Detail({ id, onBack, projects }) {
         <button onClick={() => setShowRaw(!showRaw)} className="text-sm font-medium text-slate-500 hover:text-slate-700">
           {showRaw ? "▾ 원문 접기" : "▸ 회의 원문 보기"}
         </button>
-        {showRaw && (
-          <pre className="mt-3 whitespace-pre-wrap rounded-2xl bg-slate-100 p-5 text-sm leading-relaxed text-slate-600">
-            {m.raw_text}
-          </pre>
-        )}
+        {showRaw && <RawTextViewer text={m.raw_text} />}
       </section>
+    </div>
+  );
+}
+
+/* 원문 보기 + 원문 내 검색: 대소문자 무시 하이라이트, Enter/버튼으로 이전·다음 이동 */
+function RawTextViewer({ text }) {
+  const [kw, setKw] = useState("");
+  const [cur, setCur] = useState(0);
+  const curRef = useRef(null);
+  const k = kw.trim().toLowerCase();
+
+  // 매치 분해: 문자열과 {m, n}(n번째 매치) 조각의 배열
+  const parts = [];
+  let count = 0;
+  if (k) {
+    const lower = text.toLowerCase();
+    let i = 0, idx;
+    while ((idx = lower.indexOf(k, i)) !== -1) {
+      parts.push(text.slice(i, idx), { m: text.slice(idx, idx + k.length), n: count++ });
+      i = idx + k.length;
+    }
+    parts.push(text.slice(i));
+  }
+
+  useEffect(() => setCur(0), [k]);
+  useEffect(() => {
+    curRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [cur, k]);
+  const move = (d) => count && setCur((c) => (c + d + count) % count);
+
+  return (
+    <div className="mt-3">
+      <div className="flex items-center gap-2">
+        <input value={kw} onChange={(e) => setKw(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), move(e.shiftKey ? -1 : 1))}
+          placeholder="🔍 원문 내 검색 (Enter: 다음, Shift+Enter: 이전)"
+          className="w-full max-w-sm rounded-xl border border-slate-200 px-3 py-1.5 text-sm outline-none focus:border-teal-500" />
+        {k && (
+          <span className={`whitespace-nowrap text-xs ${count ? "text-slate-500" : "text-rose-500"}`}>
+            {count ? `${cur + 1} / ${count}건` : "일치 없음"}
+          </span>
+        )}
+        {count > 1 && (
+          <>
+            <button onClick={() => move(-1)} title="이전 (Shift+Enter)"
+              className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-500 hover:bg-slate-50">▲</button>
+            <button onClick={() => move(1)} title="다음 (Enter)"
+              className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-500 hover:bg-slate-50">▼</button>
+          </>
+        )}
+      </div>
+      <pre className="mt-3 whitespace-pre-wrap rounded-2xl bg-slate-100 p-5 text-sm leading-relaxed text-slate-600">
+        {k
+          ? parts.map((p, i) =>
+              typeof p === "string" ? p : (
+                <mark key={i} ref={p.n === cur ? curRef : null}
+                  className={`rounded px-0.5 ${p.n === cur ? "bg-amber-400 font-semibold" : "bg-amber-200"}`}>
+                  {p.m}
+                </mark>
+              ))
+          : text}
+      </pre>
     </div>
   );
 }
