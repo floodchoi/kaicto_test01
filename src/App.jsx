@@ -2233,8 +2233,10 @@ export default function App() {
 
   // 내 계정 정보 + 사용자별 Gemini 키(서버 저장). 키는 본인 키 또는(허용 시) 관리자 키.
   const [me, setMe] = useState(null);
+  const [meError, setMeError] = useState(null); // 로드 실패를 숨기지 않고 표시 (마이그레이션 누락 진단용)
   const refreshMe = async () => {
     try {
+      setMeError(null);
       let m = await api("/api/me");
       // 예전 버전이 브라우저에 남긴 키를 서버(계정별)로 1회 이전
       const legacy = localStorage.getItem("gemini_api_key");
@@ -2247,8 +2249,9 @@ export default function App() {
       }
       setMe(m);
       setSettings((p) => ({ ...p, apiKey: m.gemini_key }));
-    } catch {
-      /* 401은 api()가 처리, 그 외는 다음 기회에 */
+    } catch (e) {
+      // 401은 api()가 처리(로그인 화면으로). 그 외(DB 마이그레이션 누락 등)는 배너로 표시
+      setMeError(e.message);
     }
   };
   useEffect(() => {
@@ -2671,6 +2674,16 @@ export default function App() {
         </div>
       </header>
       <main className="mx-auto max-w-3xl px-4 py-8">
+        {meError && (
+          <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl bg-amber-50 px-4 py-2.5 text-sm text-amber-700">
+            <span>
+              ⚠️ 계정 정보를 불러오지 못했습니다: {meError} — DB 마이그레이션(migrate.sql) 실행 여부를 확인하세요.
+            </span>
+            <button onClick={refreshMe} className="font-medium underline">
+              다시 시도
+            </button>
+          </div>
+        )}
         {/* 탭: 회의록 / 액션 아이템 */}
         {(view.name === "list" || view.name === "actions") && (
           <div className="mb-6 flex gap-2">
