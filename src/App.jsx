@@ -796,17 +796,7 @@ function Settings({ settings, me, onSave, onClose }) {
       sttApiKey: sttApiKey.trim(),
       sttModel,
     };
-    setSaving(true);
-    setSaveError(null);
-    try {
-      // Gemini 키는 계정별 서버 저장 (다른 기기·브라우저에서도 동일 계정이면 사용 가능)
-      await api("/api/me", { method: "PUT", body: JSON.stringify({ gemini_api_key: next.apiKey }) });
-    } catch (e) {
-      setSaveError("키 저장 실패: " + e.message);
-      setSaving(false);
-      return;
-    }
-    // 나머지 환경 설정(모델·로컬 LLM 등)은 이 브라우저에 저장
+    // 브라우저 설정(모델·로컬 LLM 등)은 서버와 무관 — 먼저 저장해 서버 오류에 인질 잡히지 않게
     localStorage.setItem("gemini_model", next.model);
     localStorage.setItem("summary_provider", next.summaryProvider);
     localStorage.setItem("local_base_url", next.localBaseUrl);
@@ -814,6 +804,19 @@ function Settings({ settings, me, onSave, onClose }) {
     localStorage.setItem("gemini_stt_api_key", next.sttApiKey);
     localStorage.setItem("gemini_stt_model", next.sttModel);
     onSave(next);
+
+    // Gemini 키는 계정별 서버 저장 — 바뀐 경우에만 호출
+    if (next.apiKey !== (settings.apiKey ?? "").trim()) {
+      setSaving(true);
+      setSaveError(null);
+      try {
+        await api("/api/me", { method: "PUT", body: JSON.stringify({ gemini_api_key: next.apiKey }) });
+      } catch (e) {
+        setSaveError(`키 저장 실패 (다른 설정은 저장되었습니다): ${e.message}`);
+        setSaving(false);
+        return; // 모달 유지 — 사용자가 오류를 볼 수 있게
+      }
+    }
     onClose();
   };
 
