@@ -2555,6 +2555,20 @@ export default function App() {
   // 내 계정 정보 + 사용자별 Gemini 키(서버 저장). 키는 본인 키 또는(허용 시) 관리자 키.
   const [me, setMe] = useState(null);
   const [meError, setMeError] = useState(null); // 로드 실패를 숨기지 않고 표시 (마이그레이션 누락 진단용)
+  const [migrating, setMigrating] = useState(false);
+  // 스키마 오류 시 관리자가 화면에서 바로 migrate.sql을 실행 (서버가 멱등 실행)
+  const runMigrate = async () => {
+    setMigrating(true);
+    try {
+      await api("/api/migrate", { method: "POST" });
+      await refreshMe();
+      refreshProjects();
+    } catch (e) {
+      setMeError(`마이그레이션 실패: ${e.message}`);
+    } finally {
+      setMigrating(false);
+    }
+  };
   const refreshMe = async () => {
     try {
       setMeError(null);
@@ -3008,6 +3022,9 @@ export default function App() {
             <span>
               ⚠️ 계정 정보를 불러오지 못했습니다: {meError} — DB 마이그레이션(migrate.sql) 실행 여부를 확인하세요.
             </span>
+            <button onClick={runMigrate} disabled={migrating} className="font-semibold underline disabled:opacity-50">
+              {migrating ? "실행 중…" : "🔧 마이그레이션 실행 (관리자)"}
+            </button>
             <button onClick={refreshMe} className="font-medium underline">
               다시 시도
             </button>

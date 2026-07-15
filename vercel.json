@@ -1,4 +1,7 @@
 {
+  "functions": {
+    "api/migrate.js": { "includeFiles": "migrate.sql" }
+  },
   "headers": [
     {
       "source": "/(.*)",
