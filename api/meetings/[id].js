@@ -73,6 +73,14 @@ export default wrap(async function handler(req, res) {
     });
   }
 
+  // 회의록 삭제 — 소유자만. 액션 아이템은 FK CASCADE로 함께 삭제.
+  if (req.method === "DELETE") {
+    const [row] = await sql`
+      DELETE FROM meetings WHERE id = ${id} AND user_id = ${userId} RETURNING id`;
+    if (!row) return res.status(404).json({ error: "not found" });
+    return res.status(200).json({ ok: true });
+  }
+
   if (req.method === "PATCH") {
     // 액션 아이템 완료 토글: { actionItemId, done } — 소유자만 (공개 열람자는 불가)
     const { actionItemId, done } = req.body ?? {};
@@ -85,5 +93,5 @@ export default wrap(async function handler(req, res) {
     return res.status(200).json(row);
   }
 
-  res.status(405).json({ error: "GET/PUT/PATCH only" });
+  res.status(405).json({ error: "GET/PUT/PATCH/DELETE only" });
 });

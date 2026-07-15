@@ -2500,6 +2500,7 @@ function Detail({ id, onBack, projects }) {
   const [m, setM] = useState(null);
   const [showRaw, setShowRaw] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     api(`/api/meetings/${id}`).then(setM).catch(console.error);
@@ -2536,12 +2537,31 @@ function Detail({ id, onBack, projects }) {
           ← 목록으로
         </button>
         {m.is_owner && (
-          <button
-            onClick={() => setEditing(true)}
-            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
-          >
-            ✏️ 수정
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setEditing(true)}
+              className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
+            >
+              ✏️ 수정
+            </button>
+            <button
+              onClick={async () => {
+                if (!confirm(`"${m.title}" 회의록을 삭제할까요?\n액션 아이템도 함께 삭제되며 되돌릴 수 없습니다.`)) return;
+                setDeleting(true);
+                try {
+                  await api(`/api/meetings/${id}`, { method: "DELETE" });
+                  onBack();
+                } catch (e) {
+                  alert("삭제 실패: " + e.message);
+                  setDeleting(false);
+                }
+              }}
+              disabled={deleting}
+              className="rounded-lg border border-red-200 bg-white px-3 py-1.5 text-sm font-medium text-red-500 hover:bg-red-50 disabled:opacity-40"
+            >
+              {deleting ? "삭제 중…" : "🗑 삭제"}
+            </button>
+          </div>
         )}
       </div>
 
