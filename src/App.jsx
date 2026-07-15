@@ -1575,6 +1575,8 @@ function Help({ onClose }) {
             · <b>녹음 원본(오디오)</b>: 서버에 올라가지 않고 <b>이 브라우저의 로컬 저장소</b>("보관된 녹음")에만
             있습니다. "💾 파일로 저장"을 누르면 다운로드 폴더에 저장되어 Finder/탐색기로 접근할 수 있습니다.<br />
             · <b>Gemini API 키</b>: 내 계정에 암호화 저장.<br />
+            · <b>작성 중 초안</b>: 이 브라우저에 자동 임시 저장 — 저장 전에 페이지를 닫거나 새로고침해도
+            "새 회의록"에서 이어서 작성할 수 있습니다.<br />
             · <b>환경 설정</b>(모델 선택, 로컬 LLM 주소 등): 이 브라우저에만 저장.
           </p>
         </section>
@@ -1615,7 +1617,7 @@ function Help({ onClose }) {
 }
 
 /* ── 대시보드: 회의록 리스트 + 검색(키워드·날짜 범위) ─────── */
-function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, projects, projectFilter, setProjectFilter, onManageProjects }) {
+function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, projects, projectFilter, setProjectFilter, onManageProjects, draftPreview }) {
   const [meetings, setMeetings] = useState(null);
   const [q, setQ] = useState("");
   const [from, setFrom] = useState("");
@@ -1638,6 +1640,18 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, projects, 
     <div className="space-y-6">
       {/* 백그라운드 전사 진행 카드 — 목록에 있어도 진행 상황이 보임 */}
       <TransPanel trans={trans} onGoto={onGotoNew} onDismiss={onDismissTrans} />
+
+      {/* 작성 중인 초안 — 새로고침·재방문 후에도 이어서 작성 */}
+      {draftPreview && trans.status === "idle" && (
+        <button
+          onClick={onGotoNew}
+          className="flex w-full items-center gap-2 rounded-xl border border-teal-200 bg-teal-50 px-4 py-2.5 text-left text-sm text-teal-800 hover:bg-teal-100"
+        >
+          <span className="shrink-0">✍️ 작성 중인 회의록:</span>
+          <span className="min-w-0 flex-1 truncate text-teal-600">{draftPreview}</span>
+          <span className="shrink-0 font-semibold">이어서 작성 →</span>
+        </button>
+      )}
 
       <div className="flex flex-wrap items-center gap-2">
         <input
@@ -1894,6 +1908,26 @@ function NewMeeting({
       <button onClick={onCancel} className="text-sm font-medium text-teal-700 hover:underline">
         ← 목록으로
       </button>
+
+      {/* 새로고침·탭 닫기 후 복원된 초안 안내 */}
+      {draft.restoredAt && (
+        <div className="flex flex-wrap items-center gap-2 rounded-xl bg-teal-50 px-4 py-2.5 text-sm text-teal-700">
+          <span>
+            💾 임시 저장된 초안을 불러왔습니다
+            {Number.isFinite(draft.restoredAt) && ` (${new Date(draft.restoredAt).toLocaleString("ko-KR")})`}
+            . 이어서 작성하세요.
+          </span>
+          <button
+            onClick={() => {
+              if (confirm("임시 저장된 초안을 지우고 새로 작성할까요?"))
+                setDraft({ title: "", text: "" });
+            }}
+            className="font-medium underline"
+          >
+            초안 지우고 새로 쓰기
+          </button>
+        </div>
+      )}
 
       <input
         value={title}
@@ -2612,7 +2646,26 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authed]);
   // 작성 중인 초안 + 전사 진행 상태를 App이 보유 → 화면을 이동해도 전사가 계속되고 목록에서도 보임
-  const [draft, setDraft] = useState({ title: "", text: "" });
+  // 초안은 localStorage에도 임시 저장 → 새로고침·탭 닫기 후에도 이어서 작성 가능
+  const [draft, setDraft] = useState(() => {
+    try {
+      const d = JSON.parse(localStorage.getItem("draft_meeting"));
+      if (d?.title?.trim() || d?.text?.trim())
+        return { title: d.title ?? "", text: d.text ?? "", restoredAt: d.savedAt };
+    } catch { /* 손상된 초안은 무시 */ }
+    return { title: "", text: "" };
+  });
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (draft.title.trim() || draft.text.trim())
+        localStorage.setItem(
+          "draft_meeting",
+          JSON.stringify({ title: draft.title, text: draft.text, savedAt: Date.now() }),
+        );
+      else localStorage.removeItem("draft_meeting");
+    }, 400); // 타이핑 중 과도한 쓰기 방지
+    return () => clearTimeout(t);
+  }, [draft.title, draft.text]);
   const [trans, setTrans] = useState(IDLE_TRANS);
 
   // 오디오 파일(선택 또는 녹음 결과)도 App 보유 → 화면 이동에도 유지
@@ -3060,6 +3113,11 @@ export default function App() {
             projectFilter={projectFilter}
             setProjectFilter={setProjectFilter}
             onManageProjects={() => setShowProjects(true)}
+            draftPreview={
+              draft.title.trim() || draft.text.trim()
+                ? [draft.title.trim(), draft.text.trim()].filter(Boolean).join(" — ").slice(0, 80)
+                : null
+            }
           />
         )}
         {view.name === "actions" && (
