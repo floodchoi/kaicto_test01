@@ -1854,7 +1854,13 @@ function NewMeeting({
     };
     try {
       const result = await summarizeText(text, settings, log);
-      setPreview(result);
+      // 필드 누락 응답도 편집 UI가 안전하게 다루도록 정규화
+      setPreview({
+        summary: result.summary ?? [],
+        agenda: result.agenda ?? [],
+        action_items: result.action_items ?? [],
+        tags: result.tags ?? [],
+      });
     } catch (e) {
       setError(e.message);
     } finally {
@@ -1874,6 +1880,11 @@ function NewMeeting({
           title, text, visibility,
           project_id: projectId ? Number(projectId) : null,
           ...preview,
+          // 미리보기에서 편집하다 비워진 항목은 저장에서 제외
+          summary: preview.summary.map((s) => s.trim()).filter(Boolean),
+          agenda: preview.agenda.filter((a) => a.topic?.trim() || a.discussion?.trim()),
+          action_items: preview.action_items.filter((a) => a.task?.trim()),
+          tags: preview.tags.map((t) => t.trim()).filter(Boolean),
         }),
       });
       onDone(meeting.id);
@@ -2158,7 +2169,7 @@ function NewMeeting({
         </div>
       ) : (
         <div className="space-y-4">
-          <SummaryPreview data={preview} />
+          <SummaryPreview data={preview} onChange={setPreview} />
 
           <div className="flex justify-end gap-3">
             <button
@@ -2182,13 +2193,27 @@ function NewMeeting({
   );
 }
 
-/* ── 요약 미리보기 (저장 전, 읽기 전용) ─────────────────────── */
-function SummaryPreview({ data }) {
+/* ── 요약 미리보기 (저장 전) — 항목별 인라인 수정·삭제·추가 가능 ── */
+function SummaryPreview({ data, onChange }) {
+  const up = (patch) => onChange({ ...data, ...patch });
+  const setAt = (key, i, v) => up({ [key]: data[key].map((x, j) => (j === i ? v : x)) });
+  const delAt = (key, i) => up({ [key]: data[key].filter((_, j) => j !== i) });
+  const [newTag, setNewTag] = useState("");
+  const addTag = () => {
+    const t = newTag.trim();
+    if (t && !data.tags.includes(t)) up({ tags: [...data.tags, t] });
+    setNewTag("");
+  };
+  const inputCls =
+    "w-full rounded-lg border border-transparent bg-transparent px-2 py-1 text-sm outline-none hover:border-slate-200 focus:border-teal-500 focus:bg-white";
+  const delBtn = "shrink-0 self-start px-1 text-slate-300 hover:text-red-500";
+  const addBtn = "mt-1.5 text-xs font-medium text-teal-700 hover:underline";
+
   return (
     <div className="space-y-4 rounded-2xl border border-teal-200 bg-teal-50/40 p-5">
       <div className="flex items-center gap-2">
         <span className="rounded-full bg-teal-700 px-2.5 py-0.5 text-xs font-semibold text-white">미리보기</span>
-        <span className="text-xs text-slate-500">저장하기 전 결과입니다.</span>
+        <span className="text-xs text-slate-500">저장 전 결과입니다 — 항목을 클릭하면 바로 수정할 수 있습니다.</span>
       </div>
 
       <div>
@@ -2196,22 +2221,38 @@ function SummaryPreview({ data }) {
         <ol className="mt-2 space-y-1.5">
           {data.summary.map((s, i) => (
             <li key={i} className="flex gap-2 text-sm text-slate-700">
-              <span className="font-bold text-teal-700">{i + 1}</span>{s}
+              <span className="pt-1 font-bold text-teal-700">{i + 1}</span>
+              <textarea value={s} rows={Math.max(1, Math.ceil(s.length / 60))}
+                onChange={(e) => setAt("summary", i, e.target.value)}
+                className={inputCls + " resize-none leading-relaxed"} />
+              <button onClick={() => delAt("summary", i)} title="문장 삭제" className={delBtn}>✕</button>
             </li>
           ))}
         </ol>
+        <button onClick={() => up({ summary: [...data.summary, ""] })} className={addBtn}>+ 문장 추가</button>
       </div>
 
       <div>
         <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-400">주요 아젠다</h4>
         <div className="mt-2 space-y-2.5">
           {data.agenda.map((a, i) => (
-            <div key={i} className="border-l-2 border-teal-300 pl-3">
-              <p className="text-sm font-semibold text-slate-800">{a.topic}</p>
-              <p className="mt-0.5 text-sm text-slate-600">{a.discussion}</p>
+            <div key={i} className="flex gap-2 border-l-2 border-teal-300 pl-3">
+              <div className="min-w-0 flex-1">
+                <input value={a.topic} placeholder="주제"
+                  onChange={(e) => setAt("agenda", i, { ...a, topic: e.target.value })}
+                  className={inputCls + " font-semibold text-slate-800"} />
+                <textarea value={a.discussion} placeholder="논의 내용"
+                  rows={Math.max(1, Math.ceil((a.discussion?.length ?? 0) / 60))}
+                  onChange={(e) => setAt("agenda", i, { ...a, discussion: e.target.value })}
+                  className={inputCls + " mt-0.5 resize-none leading-relaxed text-slate-600"} />
+              </div>
+              <button onClick={() => delAt("agenda", i)} title="아젠다 삭제" className={delBtn}>✕</button>
             </div>
           ))}
         </div>
+        <button onClick={() => up({ agenda: [...data.agenda, { topic: "", discussion: "" }] })} className={addBtn}>
+          + 아젠다 추가
+        </button>
       </div>
 
       <div>
@@ -2219,21 +2260,41 @@ function SummaryPreview({ data }) {
           액션 아이템 ({data.action_items.length})
         </h4>
         <ul className="mt-2 space-y-1.5">
-          {data.action_items.length === 0 && <li className="text-sm text-slate-400">없음</li>}
           {data.action_items.map((a, i) => (
-            <li key={i} className="text-sm text-slate-700">
-              • {a.task}
-              <span className="ml-2 text-xs text-slate-400">
-                {a.assignee && <span className="mr-2">👤 {a.assignee}</span>}
-                {a.due_date && <span>📅 {a.due_date}</span>}
-              </span>
+            <li key={i} className="flex flex-wrap items-center gap-2 text-sm">
+              <span className="text-slate-400">•</span>
+              <input value={a.task} placeholder="할 일"
+                onChange={(e) => setAt("action_items", i, { ...a, task: e.target.value })}
+                className={inputCls + " min-w-40 flex-1"} />
+              <input value={a.assignee ?? ""} placeholder="👤 담당자"
+                onChange={(e) => setAt("action_items", i, { ...a, assignee: e.target.value || null })}
+                className={inputCls + " w-28 text-xs"} />
+              <input value={a.due_date ?? ""} placeholder="📅 기한"
+                onChange={(e) => setAt("action_items", i, { ...a, due_date: e.target.value || null })}
+                className={inputCls + " w-28 text-xs"} />
+              <button onClick={() => delAt("action_items", i)} title="액션 아이템 삭제" className={delBtn}>✕</button>
             </li>
           ))}
         </ul>
+        <button
+          onClick={() => up({ action_items: [...data.action_items, { task: "", assignee: null, due_date: null }] })}
+          className={addBtn}
+        >
+          + 액션 아이템 추가
+        </button>
       </div>
 
-      <div className="flex flex-wrap gap-1.5">
-        {data.tags.map((t) => <Tag key={t}>{t}</Tag>)}
+      <div className="flex flex-wrap items-center gap-1.5">
+        {data.tags.map((t, i) => (
+          <span key={i} className="flex items-center gap-1 rounded-full bg-teal-50 px-2.5 py-0.5 text-xs font-medium text-teal-700">
+            {t}
+            <button onClick={() => delAt("tags", i)} title="태그 삭제" className="text-teal-400 hover:text-red-500">✕</button>
+          </span>
+        ))}
+        <input value={newTag} onChange={(e) => setNewTag(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addTag(); } }}
+          onBlur={addTag} placeholder="+ 태그 (Enter)"
+          className="w-28 rounded-full border border-dashed border-slate-300 bg-transparent px-2.5 py-0.5 text-xs outline-none focus:border-teal-500" />
       </div>
     </div>
   );
