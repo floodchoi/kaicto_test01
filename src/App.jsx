@@ -577,6 +577,18 @@ const SUMMARY_GEMINI_SCHEMA = {
 const SUMMARY_JSON_HINT = `반드시 아래 JSON만 출력하라(코드펜스·설명 금지):
 {"summary":["문장1","문장2","문장3"],"agenda":[{"topic":"...","discussion":"..."}],"action_items":[{"task":"...","assignee":null,"due_date":null}],"tags":["..."]}`;
 
+// 사용자 메시지: 긴 영어 원문 뒤에서 지시가 잊히지 않게, 한국어 출력 지시를 원문 뒤에도 한 번 더 둔다.
+const summaryUserPrompt = (text, koRetry) =>
+  `다음 회의 스크립트를 규칙에 따라 JSON으로 정리하라.\n\n${text}\n\n중요: summary·topic·discussion·task·tags의 모든 텍스트는 반드시 한국어로 작성한다. 회의가 영어로 진행됐어도 한국어로 요약한다 (고유명사·전문용어만 원어 허용).${
+    koRetry ? "\n경고: 직전 시도는 영어로 출력되어 폐기됐다. 이번에는 한 문장도 빠짐없이 한국어로 써라." : ""
+  }`;
+
+// 한글 비율 — 요약이 입력 언어(영어)를 따라가 버린 사고를 감지
+const hangulRatio = (s) => {
+  const t = s.replace(/\s/g, "");
+  return t ? (t.match(/[가-힣]/g)?.length ?? 0) / t.length : 1;
+};
+
 const stripFences = (s) =>
   s.replace(/^\s*```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
 
@@ -594,7 +606,7 @@ function extractJson(s) {
 }
 
 // onLog(줄, replace?) — 진행 로그 콜백. replace=true면 직전 줄을 갱신(수신 글자수 등).
-async function summarizeWithGemini(text, apiKey, model, onLog) {
+async function summarizeWithGemini(text, apiKey, model, onLog, koRetry = false) {
   onLog?.(`Gemini(${model})에 요약 요청 — 원문 ${text.length.toLocaleString()}자`);
   const res = await gfetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`,
@@ -603,7 +615,7 @@ async function summarizeWithGemini(text, apiKey, model, onLog) {
       headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: SUMMARY_SYSTEM }] },
-        contents: [{ parts: [{ text }] }],
+        contents: [{ parts: [{ text: summaryUserPrompt(text, koRetry) }] }],
         generationConfig: { responseMimeType: "application/json", responseSchema: SUMMARY_GEMINI_SCHEMA },
       }),
     },
@@ -677,7 +689,7 @@ async function summarizeWithGemini(text, apiKey, model, onLog) {
   }
 }
 
-async function summarizeWithLocal(text, baseUrl, model, onLog) {
+async function summarizeWithLocal(text, baseUrl, model, onLog, koRetry = false) {
   // 주소 보정: 끝 슬래시 제거 + /v1 누락 시 자동 추가 (Ollama·LM Studio 모두 /v1 사용)
   let base = baseUrl.replace(/\/+$/, "");
   if (!/\/v1$/.test(base)) base += "/v1";
@@ -696,7 +708,7 @@ async function summarizeWithLocal(text, baseUrl, model, onLog) {
         temperature: 0.2,
         messages: [
           { role: "system", content: SUMMARY_SYSTEM + "\n\n" + SUMMARY_JSON_HINT },
-          { role: "user", content: text },
+          { role: "user", content: summaryUserPrompt(text, koRetry) },
         ],
       }),
     });
@@ -770,15 +782,31 @@ async function summarizeWithLocal(text, baseUrl, model, onLog) {
   }
 }
 
-// 제공자 분기 — onLog(줄, replace?)로 진행 상황을 실시간 보고
+// 제공자 분기 — onLog(줄, replace?)로 진행 상황을 실시간 보고.
+// 결과가 영어로 나오면(입력 언어를 따라간 사고) 한국어 강제 지시로 1회 재요청.
 async function summarizeText(text, settings, onLog) {
   if (settings.summaryProvider === "local") {
     if (!settings.localBaseUrl?.trim()) throw new Error("로컬 서버 주소를 설정에서 입력해주세요.");
     if (!settings.localModel?.trim()) throw new Error("로컬 모델명을 설정에서 입력해주세요.");
-    return summarizeWithLocal(text, settings.localBaseUrl, settings.localModel, onLog);
+  } else if (!settings.apiKey) {
+    throw new Error("Gemini API 키를 설정에서 입력해주세요.");
   }
-  if (!settings.apiKey) throw new Error("Gemini API 키를 설정에서 입력해주세요.");
-  return summarizeWithGemini(text, settings.apiKey, settings.model, onLog);
+  const run = (koRetry) =>
+    settings.summaryProvider === "local"
+      ? summarizeWithLocal(text, settings.localBaseUrl, settings.localModel, onLog, koRetry)
+      : summarizeWithGemini(text, settings.apiKey, settings.model, onLog, koRetry);
+
+  let result = await run(false);
+  const sample = [
+    ...(result.summary ?? []),
+    ...(result.agenda ?? []).flatMap((a) => [a?.topic, a?.discussion]),
+    ...(result.action_items ?? []).map((a) => a?.task),
+  ].filter(Boolean).join(" ");
+  if (sample && hangulRatio(sample) < 0.15) {
+    onLog?.("⚠️ 요약이 영어로 생성됨 — 한국어로 다시 요청합니다…");
+    result = await run(true);
+  }
+  return result;
 }
 
 function Tag({ children }) {
