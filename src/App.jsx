@@ -375,6 +375,17 @@ const downloadBlob = (blob, name) => {
 };
 
 // 전사도 브라우저에서 직접 Gemini 호출. 스트리밍(SSE)으로 받아 조각마다 onDelta 콜백.
+// Gemini 응답(단일 객체 또는 청크 배열)에서 모든 텍스트 파트를 이어붙인다.
+// 일부 모델은 alt=sse를 무시하고 parts 배열이 여러 개인 통짜 JSON으로 응답한다.
+const joinGeminiParts = (body) =>
+  (Array.isArray(body) ? body : [body])
+    .flatMap((o) => o?.candidates?.[0]?.content?.parts ?? [])
+    .map((p) => p.text)
+    .filter(Boolean)
+    .join("");
+
+const lastGeminiCandidate = (body) => (Array.isArray(body) ? body.at(-1) : body)?.candidates?.[0];
+
 async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, prompt = TRANSCRIBE_PROMPT) {
   const res = await gfetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`,
@@ -388,6 +399,23 @@ async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, p
     "전사 요청",
   );
   if (!res.ok) throw new Error("전사 실패: " + (await geminiErr(res)));
+
+  // 일부 모델은 alt=sse를 무시하고 통짜 JSON으로 응답한다
+  if (!(res.headers.get("content-type") ?? "").includes("event-stream")) {
+    const body = await res.json();
+    const whole = joinGeminiParts(body);
+    if (whole.trim()) {
+      onDelta?.(whole);
+      return whole;
+    }
+    const cand = lastGeminiCandidate(body);
+    const why =
+      (body?.promptFeedback?.blockReason && "차단됨: " + body.promptFeedback.blockReason) ||
+      (cand?.finishReason ? `finishReason=${cand.finishReason}` : "모델이 텍스트를 반환하지 않음");
+    throw new Error(
+      `전사 결과가 비어있습니다 (${why}). 오디오에 사람 음성이 들리는지, 형식(aac/m4a/mp3/wav)이 맞는지 확인하세요.`,
+    );
+  }
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -551,36 +579,55 @@ async function summarizeWithGemini(text, apiKey, model, onLog) {
   if (!res.ok) throw new Error("요약 실패: " + (await geminiErr(res)));
 
   onLog?.("모델 응답 대기 중… (입력이 길수록 오래 걸립니다)");
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
   let full = "";
   let finishReason = null;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const events = buffer.split(/\r?\n\r?\n/);
-    buffer = events.pop() ?? "";
-    for (const ev of events) {
-      for (const line of ev.split(/\r?\n/)) {
-        if (!line.startsWith("data:")) continue;
-        const json = line.slice(5).trim();
-        if (!json || json === "[DONE]") continue;
-        let obj;
-        try {
-          obj = JSON.parse(json);
-        } catch {
-          continue;
-        }
-        const cand = obj.candidates?.[0];
-        if (cand?.finishReason) finishReason = cand.finishReason;
-        const delta = cand?.content?.parts?.map((p) => p.text).filter(Boolean).join("") ?? "";
-        if (delta) {
-          full += delta;
-          onLog?.(`응답 수신 중… ${full.length.toLocaleString()}자`, true);
+  if (!(res.headers.get("content-type") ?? "").includes("event-stream")) {
+    // 일부 모델은 alt=sse를 무시하고 통짜 JSON으로 응답 — 전체를 받아 파트를 이어붙인다
+    const body = await res.json();
+    full = joinGeminiParts(body);
+    finishReason = lastGeminiCandidate(body)?.finishReason ?? null;
+    if (full) onLog?.(`응답 수신 완료 — ${full.length.toLocaleString()}자`, true);
+  } else {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let raw = ""; // SSE 형식이 아니었을 때의 폴백 파싱용 원문 누적
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      raw += chunk;
+      buffer += chunk;
+      const events = buffer.split(/\r?\n\r?\n/);
+      buffer = events.pop() ?? "";
+      for (const ev of events) {
+        for (const line of ev.split(/\r?\n/)) {
+          if (!line.startsWith("data:")) continue;
+          const json = line.slice(5).trim();
+          if (!json || json === "[DONE]") continue;
+          let obj;
+          try {
+            obj = JSON.parse(json);
+          } catch {
+            continue;
+          }
+          const cand = obj.candidates?.[0];
+          if (cand?.finishReason) finishReason = cand.finishReason;
+          const delta = cand?.content?.parts?.map((p) => p.text).filter(Boolean).join("") ?? "";
+          if (delta) {
+            full += delta;
+            onLog?.(`응답 수신 중… ${full.length.toLocaleString()}자`, true);
+          }
         }
       }
+    }
+    if (!full.trim() && /^\s*[[{]/.test(raw)) {
+      // event-stream 헤더였지만 실제 본문이 JSON 문서였던 경우
+      try {
+        const body = JSON.parse(raw);
+        full = joinGeminiParts(body);
+        finishReason = lastGeminiCandidate(body)?.finishReason ?? finishReason;
+      } catch { /* 아래 빈 응답 오류로 진행 */ }
     }
   }
   if (!full.trim())
