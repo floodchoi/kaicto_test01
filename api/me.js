@@ -3,37 +3,53 @@ import { wrap } from "./_wrap.js";
 import { requireAuth, encryptSecret, decryptSecret } from "./_auth.js";
 
 // GET  /api/me → 내 계정 정보 + 사용할 Gemini 키(본인 키, 없고 허용됐으면 관리자 키)
-// PUT  /api/me { gemini_api_key } → 내 Gemini 키 저장 (빈 문자열 = 삭제)
+//                관리자 키 사용 시 관리자가 지정한 모델(admin_model/admin_stt_model)도 포함
+// PUT  /api/me { gemini_api_key? , shared_model?, shared_stt_model? }
+//                키 저장(빈 문자열 = 삭제) / 공유 모델 지정(관리자 전용, 빈 문자열 = 지정 해제)
 export default wrap(async function handler(req, res) {
   const userId = requireAuth(req, res);
   if (!userId) return;
 
   if (req.method === "PUT") {
-    const key = String(req.body?.gemini_api_key ?? "").trim();
-    if (key.length > 300) return res.status(400).json({ error: "키가 너무 깁니다." });
-    await sql`
-      UPDATE users SET gemini_key_enc = ${key ? encryptSecret(key) : null}
-      WHERE id = ${userId}`;
+    const b = req.body ?? {};
+    if ("gemini_api_key" in b) {
+      const key = String(b.gemini_api_key ?? "").trim();
+      if (key.length > 300) return res.status(400).json({ error: "키가 너무 깁니다." });
+      await sql`
+        UPDATE users SET gemini_key_enc = ${key ? encryptSecret(key) : null}
+        WHERE id = ${userId}`;
+    }
+    if ("shared_model" in b || "shared_stt_model" in b) {
+      const [u] = await sql`SELECT is_admin FROM users WHERE id = ${userId}`;
+      if (!u?.is_admin) return res.status(403).json({ error: "공유 모델은 관리자만 지정할 수 있습니다." });
+      const sm = String(b.shared_model ?? "").trim().slice(0, 100) || null;
+      const ss = String(b.shared_stt_model ?? "").trim().slice(0, 100) || null;
+      await sql`UPDATE users SET shared_model = ${sm}, shared_stt_model = ${ss} WHERE id = ${userId}`;
+    }
     return res.status(200).json({ ok: true });
   }
 
   if (req.method !== "GET") return res.status(405).json({ error: "GET/PUT only" });
 
   const [me] = await sql`
-    SELECT email, is_admin, can_use_admin_key, gemini_key_enc
+    SELECT email, is_admin, can_use_admin_key, gemini_key_enc, shared_model, shared_stt_model
     FROM users WHERE id = ${userId}`;
   if (!me) return res.status(401).json({ error: "로그인이 필요합니다." });
 
   const ownKey = me.gemini_key_enc ? decryptSecret(me.gemini_key_enc) : null;
 
-  // 본인 키가 없고 관리자 키 사용이 허용된 회원이면 관리자의 키를 내려준다
+  // 본인 키가 없고 관리자 키 사용이 허용된 회원이면 관리자의 키(+지정 모델)를 내려준다
   let adminKey = null;
+  let adminModels = {};
   if (!ownKey && me.can_use_admin_key) {
     const [admin] = await sql`
-      SELECT gemini_key_enc FROM users
+      SELECT gemini_key_enc, shared_model, shared_stt_model FROM users
       WHERE is_admin = true AND gemini_key_enc IS NOT NULL
       ORDER BY id LIMIT 1`;
-    if (admin) adminKey = decryptSecret(admin.gemini_key_enc);
+    if (admin) {
+      adminKey = decryptSecret(admin.gemini_key_enc);
+      adminModels = { admin_model: admin.shared_model, admin_stt_model: admin.shared_stt_model };
+    }
   }
 
   res.status(200).json({
@@ -43,5 +59,8 @@ export default wrap(async function handler(req, res) {
     has_own_key: !!ownKey,
     using_admin_key: !ownKey && !!adminKey,
     gemini_key: ownKey ?? adminKey ?? "",
+    // 관리자 본인: Settings 프리필용 / 관리자 키 사용자: 강제할 모델
+    ...(me.is_admin && { shared_model: me.shared_model, shared_stt_model: me.shared_stt_model }),
+    ...(!ownKey && adminKey ? adminModels : {}),
   });
 });

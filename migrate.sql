@@ -15,7 +15,9 @@ ALTER TABLE users
   ADD COLUMN IF NOT EXISTS is_admin          BOOLEAN NOT NULL DEFAULT false,
   ADD COLUMN IF NOT EXISTS approved          BOOLEAN NOT NULL DEFAULT false,
   ADD COLUMN IF NOT EXISTS can_use_admin_key BOOLEAN NOT NULL DEFAULT false,
-  ADD COLUMN IF NOT EXISTS gemini_key_enc    TEXT;
+  ADD COLUMN IF NOT EXISTS gemini_key_enc    TEXT,
+  ADD COLUMN IF NOT EXISTS shared_model      TEXT,   -- 관리자 키 사용자에게 강제할 요약 모델
+  ADD COLUMN IF NOT EXISTS shared_stt_model  TEXT;   -- 〃 전사 모델 (비우면 shared_model)
 
 -- 초기 관리자 지정 (이미 가입돼 있으면 승격, 미가입이면 가입 시 자동 지정)
 UPDATE users SET is_admin = true, approved = true WHERE email = 'floodchoi@gmail.com';
