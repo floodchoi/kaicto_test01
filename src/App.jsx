@@ -95,12 +95,16 @@ const waitOnline = () =>
     : new Promise((r) => window.addEventListener("online", r, { once: true }));
 
 // Gemini fetch 래퍼: 오프라인이면 복구까지 대기, 일시 오류는 최대 2회 재시도.
+// timeoutMs를 주면 해당 시간 안에 응답이 없을 때 끊고 재시도 (멈춘 연결이 무한 대기하지 않게).
 // 그래도 실패하면 어느 단계였는지 + 흔한 원인을 담아 보고한다.
-async function gfetch(url, opts, what) {
+async function gfetch(url, opts, what, timeoutMs) {
   for (let attempt = 0; ; ) {
     try {
       await waitOnline();
-      return await fetch(url, opts);
+      return await fetch(url, {
+        ...opts,
+        signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : opts.signal,
+      });
     } catch (e) {
       if (!navigator.onLine) continue; // 전송 중 끊김 → 복구 대기 후 재시도 (시도 횟수 미소모)
       if (++attempt > 2)
@@ -129,7 +133,7 @@ async function uploadAudioToGemini(file, apiKey, onStage) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ file: { display_name: file.name } }),
-  }, "업로드 준비");
+  }, "업로드 준비", 30_000);
   if (!start.ok) throw new Error(await geminiErr(start));
   const uploadUrl = start.headers.get("x-goog-upload-url");
   if (!uploadUrl) throw new Error("업로드 URL을 받지 못했습니다.");
@@ -140,7 +144,7 @@ async function uploadAudioToGemini(file, apiKey, onStage) {
     // Content-Length는 브라우저가 File 크기로 자동 설정 (수동 지정은 무시됨)
     headers: { "X-Goog-Upload-Offset": "0", "X-Goog-Upload-Command": "upload, finalize" },
     body: file,
-  }, "오디오 업로드");
+  }, "오디오 업로드", 600_000); // 큰 조각도 10분 안엔 끝나야 정상 — 멈춘 업로드 무한 대기 방지
   if (!up.ok) throw new Error(await geminiErr(up));
   let meta = (await up.json()).file;
 
@@ -148,7 +152,7 @@ async function uploadAudioToGemini(file, apiKey, onStage) {
   for (let i = 0; meta.state === "PROCESSING" && i < 60; i++) {
     onStage?.("오디오 처리 중…");
     await new Promise((r) => setTimeout(r, 1500));
-    const poll = await gfetch(`${base}/v1beta/${meta.name}`, { headers: { "x-goog-api-key": apiKey } }, "오디오 처리 확인");
+    const poll = await gfetch(`${base}/v1beta/${meta.name}`, { headers: { "x-goog-api-key": apiKey } }, "오디오 처리 확인", 30_000);
     if (!poll.ok) throw new Error(await geminiErr(poll));
     meta = await poll.json();
   }
@@ -389,6 +393,7 @@ const joinGeminiParts = (body) =>
 const lastGeminiCandidate = (body) => (Array.isArray(body) ? body.at(-1) : body)?.candidates?.[0];
 
 async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, prompt = TRANSCRIBE_PROMPT) {
+  const ctrl = new AbortController(); // 응답이 멈추면 연결을 강제로 끊기 위한 컨트롤러
   const res = await gfetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`,
     {
@@ -400,6 +405,7 @@ async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, p
         // 루프에 빠지기 쉽다 — 약간의 온도로 반복 고리를 끊는다.
         generationConfig: { temperature: 0.3 },
       }),
+      signal: ctrl.signal,
     },
     "전사 요청",
   );
@@ -428,15 +434,28 @@ async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, p
   let full = "";
   let finishReason = "";
   let note = "";
+  const STALL_MS = 120_000; // 이 시간 동안 아무 데이터도 없으면 멈춘 것으로 판단
   while (true) {
-    let done, value;
+    let done, value, timer;
     try {
-      ({ done, value } = await reader.read());
+      const readP = reader.read();
+      readP.catch(() => {}); // 감시 타임아웃으로 중단 시 unhandled rejection 방지
+      ({ done, value } = await Promise.race([
+        readP,
+        new Promise((_, rej) => {
+          timer = setTimeout(() => {
+            ctrl.abort();
+            rej(new Error(`${STALL_MS / 1000}초간 응답 없음`));
+          }, STALL_MS);
+        }),
+      ]));
     } catch (e) {
-      // 스트리밍 수신 도중 네트워크 끊김
+      // 스트리밍 수신 도중 네트워크 끊김 또는 응답 정지
       throw new Error(
         `전사 수신이 중단되었습니다 (${e.message}). 네트워크 연결을 확인하고 다시 시도해주세요.`,
       );
+    } finally {
+      clearTimeout(timer);
     }
     if (done) break;
     buffer += decoder.decode(value, { stream: true }); // stream:true → 한글 멀티바이트가 청크 경계서 안 깨지게
@@ -462,6 +481,13 @@ async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, p
       if (delta) {
         full += delta;
         onDelta?.(delta);
+        // 반복 생성 폭주 차단 — 10분 조각의 정상 전사는 2만 자 안팎, 20만 자는 명백한 이상
+        if (full.length > 200_000) {
+          ctrl.abort();
+          throw new Error(
+            "전사 출력이 비정상적으로 깁니다 (같은 내용 반복 생성 감지). 다른 전사 모델로 바꾸거나 다시 시도해주세요.",
+          );
+        }
       }
     }
   }
@@ -494,6 +520,7 @@ async function suggestTitle(text, apiKey, model) {
       }),
     },
     "제목 추천",
+    60_000, // 부가 기능이 전체 흐름을 붙잡지 않게
   );
   if (!res.ok) throw new Error(await geminiErr(res));
   const t = (await res.json()).candidates?.[0]?.content?.parts?.[0]?.text?.trim();
@@ -2991,9 +3018,13 @@ export default function App() {
       let chunks = null;
       try {
         setStage("오디오 분석 중…");
-        chunks = await splitAudioToWavChunks(audioFile);
+        // 디코딩·리샘플링이 5분 넘게 걸리면(저사양·거대 파일) 멈춘 것으로 보고 통짜 전사로 폴백
+        chunks = await Promise.race([
+          splitAudioToWavChunks(audioFile),
+          new Promise((_, rej) => setTimeout(() => rej(new Error("decode timeout")), 300_000)),
+        ]);
       } catch {
-        chunks = null; // 디코딩 실패(특이 코덱 등) → 통짜 전사로 폴백
+        chunks = null; // 디코딩 실패(특이 코덱 등)·시간 초과 → 통짜 전사로 폴백
       }
 
       let acc = "";
