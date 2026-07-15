@@ -161,7 +161,9 @@ const TRANSCRIBE_PROMPT = `이 오디오는 회의 녹음이다. 요약·생략 
 - 영어로 말한 부분은 영어 원문을 그대로 전사한 뒤, 바로 다음 줄에 자연스러운 한국어 번역을 함께 제공한다. 형식:
 EN: <영어 원문>
 KO: <한국어 번역>
-화자가 구분되면 '화자1:', '화자2:'처럼 표기해라.`;
+화자가 구분되면 '화자1:', '화자2:'처럼 표기해라.
+- 무음·잡음·배경음 구간은 건너뛴다. 같은 글자·단어·문장을 기계적으로 반복해 출력하지 않는다.
+  실제로 같은 말이 여러 번 반복된 경우에도 한 번만 적고 "(반복)"이라고 표기해라.`;
 
 // 분할 전사 시 이어지는 조각용: 직전 조각 끝부분을 참고로 넘겨 문맥·화자 라벨 연속성 유지
 const contPrompt = (prevTail) =>
@@ -169,7 +171,7 @@ const contPrompt = (prevTail) =>
 
 /* ── 오디오 분할: 브라우저에서 디코딩 → 16kHz 모노 → N분 WAV 조각 ──
    긴 파일은 조각마다 전사해 결과가 점진적으로 도착(준실시간 체감).      */
-const CHUNK_SEC = 300; // 5분
+const CHUNK_SEC = 600; // 10분 (이하 1.5배 길이까지는 통짜 전사 — 15분 이하 분할 안 함)
 const SPLIT_RATE = 16000; // 음성 전사에 충분, 파일 크기 최소화
 
 function encodeWav(samples, sampleRate) {
@@ -394,6 +396,9 @@ async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, p
       headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }, { fileData: { mimeType, fileUri } }] }],
+        // temperature 0(그리디)은 무음·잡음 구간에서 같은 토큰을 무한 반복하는
+        // 루프에 빠지기 쉽다 — 약간의 온도로 반복 고리를 끊는다.
+        generationConfig: { temperature: 0.3 },
       }),
     },
     "전사 요청",
