@@ -194,6 +194,27 @@ function encodeWav(samples, sampleRate) {
   return buf;
 }
 
+// 전사 결과에서 반복 생성 잔여물을 압축: 글자·구절·줄 단위 반복을 줄임.
+// (모델이 루프에 빠져 남긴 반복이 prevTail로 다음 조각에 전파되는 것도 차단)
+function collapseRepeats(text) {
+  let t = text.replace(/(\S)\1{9,}/g, "$1$1$1"); // 같은 글자 10회+ → 3회
+  t = t.replace(/(.{2,60}?)(?:[ \t]*\1){4,}/g, "$1 (반복)"); // 같은 구절 5회+ → 1회 + 표기
+  // 같은 줄 3회+ 연속 반복 → 2회 + (반복)
+  const out = [];
+  let prev = null, run = 0;
+  for (const line of t.split("\n")) {
+    if (line === prev && line.trim()) {
+      if (++run === 1) out.push(line);
+      else if (run === 2) out.push("(반복)");
+    } else {
+      out.push(line);
+      prev = line;
+      run = 0;
+    }
+  }
+  return out.join("\n");
+}
+
 // 짧은 파일이면 null 반환(통짜 경로 사용 — 원본 그대로 보내 품질 손실 없음)
 async function splitAudioToWavChunks(file) {
   const raw = await file.arrayBuffer();
@@ -481,12 +502,20 @@ async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, p
       if (delta) {
         full += delta;
         onDelta?.(delta);
-        // 반복 생성 폭주 차단 — 10분 조각의 정상 전사는 2만 자 안팎, 20만 자는 명백한 이상
+        // 반복 생성 루프 감지: 끝부분 2000자 안에서 같은 구절이 15회+ 연달아 나오면
+        // 루프에 갇힌 것 — 즉시 끊고, 그때까지 받은 텍스트는 err.partial로 구제
+        if (full.length > 3000 && /(.{2,60}?)(?:\s*\1){14,}\s*$/.test(full.slice(-2000))) {
+          ctrl.abort();
+          const err = new Error("반복 생성 루프 감지 — 같은 구절이 계속 반복되어 중단했습니다.");
+          err.partial = full;
+          throw err;
+        }
+        // 폭주 최종 방어선 — 10분 조각의 정상 전사는 2만 자 안팎, 20만 자는 명백한 이상
         if (full.length > 200_000) {
           ctrl.abort();
-          throw new Error(
-            "전사 출력이 비정상적으로 깁니다 (같은 내용 반복 생성 감지). 다른 전사 모델로 바꾸거나 다시 시도해주세요.",
-          );
+          const err = new Error("전사 출력이 비정상적으로 깁니다 (반복 생성). 중단했습니다.");
+          err.partial = full;
+          throw err;
         }
       }
     }
@@ -3043,11 +3072,30 @@ export default function App() {
     const addDelta = (delta) => setTrans((p) => ({ ...p, liveText: p.liveText + delta }));
     setTrans({ status: "running", stage: "오디오 분석 중…", liveText: "", fileName: audioFile.name, error: null });
 
-    // 전사 수신 도중 네트워크가 끊기면: 복구를 기다렸다가 해당 조각을 1회 자동 재시도
+    // 전사 수신 도중 문제가 생기면 해당 조각을 1회 자동 재시도:
+    // - 네트워크 끊김/정지 → 복구 대기 후 재시도
+    // - 반복 생성 루프 → 새 샘플링으로 재시도, 또 반복이면 받은 부분이라도 압축해 구제
     const transcribeWithRetry = async (fileUri, mimeType, prompt, resetLive) => {
+      const salvage = (partial) =>
+        collapseRepeats(partial).trimEnd() +
+        "\n(⚠️ 이 구간은 반복 생성이 감지되어 전사가 불완전할 수 있습니다)";
       try {
         return await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, addDelta, prompt);
       } catch (e) {
+        if (/반복 생성/.test(e.message)) {
+          setStage("반복 생성 감지 — 조각 재시도 중…");
+          resetLive();
+          try {
+            return await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, addDelta, prompt);
+          } catch (e2) {
+            const partial = e2.partial ?? e.partial;
+            if (partial?.trim()) {
+              resetLive();
+              return salvage(partial); // 두 번 다 반복이면 받은 데까지 살려서 계속 진행
+            }
+            throw e2;
+          }
+        }
         if (!/중단|네트워크/.test(e.message)) throw e; // 네트워크성 오류만 재시도
         setStage("네트워크 복구 대기 중…");
         await waitOnline();
@@ -3084,11 +3132,16 @@ export default function App() {
             setStage(`${label} · ${s}`),
           );
           setStage(`${label} · 전사 중…`);
-          const prevTail = acc.slice(-200).trim();
-          const t = await transcribeWithRetry(
-            fileUri, mimeType,
-            prevTail ? contPrompt(prevTail) : TRANSCRIBE_PROMPT,
-            () => setTrans((p) => ({ ...p, liveText: acc ? acc + "\n" : "" })),
+          // 직전 조각 끝을 문맥으로 넘기되, 반복 잔여물이면 넘기지 않는다
+          // (반복 텍스트가 참고문이 되면 다음 조각도 반복을 이어감 — 전파 차단)
+          const prevTail = collapseRepeats(acc.slice(-300)).slice(-200).trim();
+          const tailUsable = prevTail && new Set(prevTail.replace(/\s/g, "")).size >= 10;
+          const t = collapseRepeats(
+            await transcribeWithRetry(
+              fileUri, mimeType,
+              tailUsable ? contPrompt(prevTail) : TRANSCRIBE_PROMPT,
+              () => setTrans((p) => ({ ...p, liveText: acc ? acc + "\n" : "" })),
+            ),
           );
           acc = acc ? acc.trimEnd() + "\n" + t.trim() : t.trim();
           setTrans((p) => ({ ...p, liveText: acc + "\n" }));
@@ -3102,8 +3155,10 @@ export default function App() {
         }
         const { fileUri, mimeType } = await uploadAudioToGemini(sendFile, sttKey, setStage);
         setStage("전사 중…");
-        acc = await transcribeWithRetry(fileUri, mimeType, TRANSCRIBE_PROMPT, () =>
-          setTrans((p) => ({ ...p, liveText: "" })),
+        acc = collapseRepeats(
+          await transcribeWithRetry(fileUri, mimeType, TRANSCRIBE_PROMPT, () =>
+            setTrans((p) => ({ ...p, liveText: "" })),
+          ),
         );
       }
 
