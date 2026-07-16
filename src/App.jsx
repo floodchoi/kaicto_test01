@@ -1712,6 +1712,12 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, projects, 
   const [q, setQ] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
+  // 목록 보기 방식: 카드 | 테이블 (브라우저에 기억)
+  const [viewMode, setViewMode] = useState(() => localStorage.getItem("list_view_mode") ?? "card");
+  const changeView = (m) => {
+    setViewMode(m);
+    localStorage.setItem("list_view_mode", m);
+  };
 
   useEffect(() => {
     const t = setTimeout(
@@ -1760,6 +1766,15 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, projects, 
           className="rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-500 shadow-sm hover:bg-slate-50">
           📁 관리
         </button>
+        {/* 보기 방식 전환: 카드 / 테이블 */}
+        <div className="flex overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+          {[["card", "🗂", "카드 보기"], ["table", "☰", "테이블 보기"]].map(([mode, icon, label]) => (
+            <button key={mode} onClick={() => changeView(mode)} title={label}
+              className={`px-2.5 py-2 text-sm ${viewMode === mode ? "bg-teal-700 text-white" : "text-slate-500 hover:bg-slate-50"}`}>
+              {icon}
+            </button>
+          ))}
+        </div>
         <button
           onClick={onNew}
           className="rounded-xl bg-teal-700 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-teal-600"
@@ -1778,6 +1793,41 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, projects, 
               첫 회의록 작성하기 →
             </button>
           )}
+        </div>
+      ) : viewMode === "table" ? (
+        <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white shadow-sm">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-400">
+                <th className="px-4 py-3 font-semibold">제목</th>
+                <th className="px-4 py-3 font-semibold">날짜</th>
+                <th className="px-4 py-3 font-semibold">프로젝트</th>
+                <th className="px-4 py-3 font-semibold">태그</th>
+                <th className="px-4 py-3 font-semibold">공개</th>
+              </tr>
+            </thead>
+            <tbody>
+              {meetings.map((m) => (
+                <tr key={m.id} onClick={() => onOpen(m.id)}
+                  className="cursor-pointer border-b border-slate-100 last:border-0 hover:bg-teal-50/40">
+                  <td className="px-4 py-3">
+                    <p className="font-medium text-slate-800">{m.title}</p>
+                    {m.summary?.[0] && <p className="mt-0.5 max-w-xs truncate text-xs text-slate-400">{m.summary[0]}</p>}
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3 text-slate-500">{fmtDate(m.created_at)}</td>
+                  <td className="whitespace-nowrap px-4 py-3 text-slate-500">{m.project_name ? `📁 ${m.project_name}` : "—"}</td>
+                  <td className="px-4 py-3">
+                    <div className="flex flex-wrap gap-1">{m.tags?.map((t) => <Tag key={t}>{t}</Tag>)}</div>
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-500">
+                    {m.visibility === "workspace"
+                      ? `👥 공개${!m.is_owner && m.owner_email ? ` · ${m.owner_email}` : ""}`
+                      : "🔒 나만"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       ) : (
         <ul className="grid gap-3 sm:grid-cols-2">
