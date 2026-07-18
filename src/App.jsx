@@ -1810,19 +1810,26 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, projects, 
               {meetings.map((m) => (
                 <tr key={m.id} onClick={() => onOpen(m.id)}
                   className="cursor-pointer border-b border-slate-100 last:border-0 hover:bg-teal-50/40">
-                  <td className="px-4 py-3">
-                    <p className="font-medium text-slate-800">{m.title}</p>
-                    {m.summary?.[0] && <p className="mt-0.5 max-w-xs truncate text-xs text-slate-400">{m.summary[0]}</p>}
+                  <td className="max-w-0 px-4 py-2" style={{ width: "45%" }}>
+                    <p className="truncate font-medium text-slate-800">{m.title}</p>
+                    {m.summary?.[0] && <p className="truncate text-xs text-slate-400">{m.summary[0]}</p>}
                   </td>
-                  <td className="whitespace-nowrap px-4 py-3 text-slate-500">{fmtDate(m.created_at)}</td>
-                  <td className="whitespace-nowrap px-4 py-3 text-slate-500">{m.project_name ? `📁 ${m.project_name}` : "—"}</td>
-                  <td className="px-4 py-3">
-                    <div className="flex flex-wrap gap-1">{m.tags?.map((t) => <Tag key={t}>{t}</Tag>)}</div>
+                  <td className="whitespace-nowrap px-4 py-2 text-xs text-slate-500">{fmtDate(m.created_at)}</td>
+                  <td className="max-w-32 truncate whitespace-nowrap px-4 py-2 text-xs text-slate-500">
+                    {m.project_name ? `📁 ${m.project_name}` : "—"}
                   </td>
-                  <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-500">
-                    {m.visibility === "workspace"
-                      ? `👥 공개${!m.is_owner && m.owner_email ? ` · ${m.owner_email}` : ""}`
-                      : "🔒 나만"}
+                  {/* 태그는 2개까지만 — 넘치면 +N (전체는 툴팁), 줄바꿈 없이 한 줄 유지 */}
+                  <td className="whitespace-nowrap px-4 py-2" title={m.tags?.join(", ")}>
+                    <div className="flex items-center gap-1">
+                      {(m.tags ?? []).slice(0, 2).map((t) => <Tag key={t}>{t}</Tag>)}
+                      {(m.tags?.length ?? 0) > 2 && (
+                        <span className="text-xs text-slate-400">+{m.tags.length - 2}</span>
+                      )}
+                    </div>
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-2 text-xs text-slate-500"
+                    title={m.visibility === "workspace" && !m.is_owner ? m.owner_email ?? "" : ""}>
+                    {m.visibility === "workspace" ? "👥 공개" : "🔒 나만"}
                   </td>
                 </tr>
               ))}
