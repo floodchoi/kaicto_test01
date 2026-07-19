@@ -1754,13 +1754,16 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, projects, 
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="제목, 내용, 태그로 검색…"
-          className="min-w-40 flex-1 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm shadow-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+          className="min-w-0 basis-full rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm shadow-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100 sm:basis-auto sm:min-w-40 sm:flex-1"
         />
-        <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} title="시작일"
-          className="rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-600 shadow-sm outline-none focus:border-teal-500" />
-        <span className="text-slate-400">~</span>
-        <input type="date" value={to} onChange={(e) => setTo(e.target.value)} title="종료일"
-          className="rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-600 shadow-sm outline-none focus:border-teal-500" />
+        {/* 날짜 범위는 한 묶음으로 — 모바일에선 한 행 전체 사용 */}
+        <div className="flex min-w-0 basis-full items-center gap-2 sm:basis-auto">
+          <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} title="시작일"
+            className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-600 shadow-sm outline-none focus:border-teal-500 sm:flex-none" />
+          <span className="text-slate-400">~</span>
+          <input type="date" value={to} onChange={(e) => setTo(e.target.value)} title="종료일"
+            className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-600 shadow-sm outline-none focus:border-teal-500 sm:flex-none" />
+        </div>
         <ProjectSelect projects={projects} value={projectFilter} onChange={setProjectFilter} />
         <button onClick={onManageProjects} title="프로젝트 추가/삭제"
           className="rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-500 shadow-sm hover:bg-slate-50">
@@ -1904,13 +1907,15 @@ function ActionItems({ onOpenMeeting, projects, projectFilter, setProjectFilter 
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="할 일, 담당자, 회의 제목으로 검색…"
-          className="min-w-40 flex-1 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm shadow-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+          className="min-w-0 basis-full rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm shadow-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100 sm:basis-auto sm:min-w-40 sm:flex-1"
         />
-        <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} title="시작일"
-          className="rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-600 shadow-sm outline-none focus:border-teal-500" />
-        <span className="text-slate-400">~</span>
-        <input type="date" value={to} onChange={(e) => setTo(e.target.value)} title="종료일"
-          className="rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-600 shadow-sm outline-none focus:border-teal-500" />
+        <div className="flex min-w-0 basis-full items-center gap-2 sm:basis-auto">
+          <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} title="시작일"
+            className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-600 shadow-sm outline-none focus:border-teal-500 sm:flex-none" />
+          <span className="text-slate-400">~</span>
+          <input type="date" value={to} onChange={(e) => setTo(e.target.value)} title="종료일"
+            className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-600 shadow-sm outline-none focus:border-teal-500 sm:flex-none" />
+        </div>
         <ProjectSelect projects={projects} value={projectFilter} onChange={setProjectFilter} />
       </div>
 
@@ -3268,10 +3273,10 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-50">
       <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-3xl items-center gap-2 px-4 py-4">
+        <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-x-1 gap-y-2 px-4 py-3 sm:gap-2 sm:py-4">
           <span className="text-xl">📝</span>
-          <h1 className="font-bold text-slate-800">Meeting Minutes</h1>
-          <span className="ml-1 rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500">AI 요약</span>
+          <h1 className="whitespace-nowrap font-bold text-slate-800">Meeting Minutes</h1>
+          <span className="ml-1 hidden rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500 sm:inline">AI 요약</span>
           {/* 녹음 중 전역 표시 — 어느 화면에서든 보이고, 클릭하면 녹음 화면으로 */}
           {rec.status !== "idle" && (
             <button
@@ -3292,27 +3297,28 @@ export default function App() {
               </span>
             </button>
           )}
+          {/* 모바일에서는 아이콘만, sm 이상에서 라벨 표시 (툴팁은 항상 제공) */}
           <button
             onClick={() => setShowSettings(true)}
             title="설정"
-            className="ml-auto rounded-lg px-2.5 py-1.5 text-sm text-slate-500 hover:bg-slate-100"
+            className="ml-auto shrink-0 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-sm text-slate-500 hover:bg-slate-100"
           >
-            ⚙️ 설정
+            ⚙️<span className="hidden sm:inline"> 설정</span>
           </button>
           <button
             onClick={() => setShowHelp(true)}
             title="기능 소개"
-            className="rounded-lg px-2.5 py-1.5 text-sm text-slate-500 hover:bg-slate-100"
+            className="shrink-0 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-sm text-slate-500 hover:bg-slate-100"
           >
-            ❓ 도움말
+            ❓<span className="hidden sm:inline"> 도움말</span>
           </button>
           {me?.is_admin && (
             <button
               onClick={() => setView({ name: "admin" })}
               title="회원 관리 (관리자)"
-              className="rounded-lg px-2.5 py-1.5 text-sm text-slate-500 hover:bg-slate-100"
+              className="shrink-0 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-sm text-slate-500 hover:bg-slate-100"
             >
-              👥 회원 관리
+              👥<span className="hidden sm:inline"> 회원 관리</span>
             </button>
           )}
           <span className="hidden text-xs text-slate-400 sm:inline">
@@ -3321,9 +3327,9 @@ export default function App() {
           <button
             onClick={logout}
             title="로그아웃"
-            className="rounded-lg px-2.5 py-1.5 text-sm text-slate-500 hover:bg-slate-100"
+            className="shrink-0 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-sm text-slate-500 hover:bg-slate-100"
           >
-            로그아웃
+            🚪<span className="hidden sm:inline"> 로그아웃</span>
           </button>
         </div>
       </header>
