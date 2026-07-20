@@ -12,6 +12,7 @@ CREATE TABLE users (
   gemini_key2_enc   TEXT,                   -- 유료(예비) 키 — 무료 한도 소진 시 자동 전환
   shared_model      TEXT,                   -- (관리자 행) 관리자 키 사용자에게 강제할 요약 모델
   shared_stt_model  TEXT,                   -- (관리자 행) 〃 전사 모델 (비우면 shared_model)
+  last_seen_at      TIMESTAMPTZ,            -- 마지막 접속(앱 로드) 시각
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 -- 초기 관리자는 floodchoi@gmail.com — 가입 시 코드에서 자동 지정.

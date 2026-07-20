@@ -1724,6 +1724,7 @@ function AdminUsers({ onBack }) {
               <tr className="border-b border-slate-100 text-left text-xs uppercase tracking-wide text-slate-400">
                 <th className="px-4 py-3">이메일</th>
                 <th className="px-4 py-3">가입일</th>
+                <th className="px-4 py-3">마지막 접속</th>
                 <th className="px-4 py-3">승인</th>
                 <th className="px-4 py-3">회의록</th>
                 <th className="px-4 py-3">본인 키</th>
@@ -1741,6 +1742,9 @@ function AdminUsers({ onBack }) {
                     )}
                   </td>
                   <td className="px-4 py-3 text-slate-500">{fmtDate(u.created_at)}</td>
+                  <td className="whitespace-nowrap px-4 py-3 text-slate-500" title={u.last_seen_at ? fmtDateTime(u.last_seen_at) : ""}>
+                    {u.last_seen_at ? fmtDate(u.last_seen_at) : "—"}
+                  </td>
                   <td className="px-4 py-3">
                     {u.is_admin || u.approved ? (
                       <span className="text-slate-500">✅</span>

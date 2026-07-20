@@ -15,7 +15,7 @@ export default wrap(async function handler(req, res) {
 
   if (req.method === "GET") {
     const rows = await sql`
-      SELECT u.id, u.email, u.is_admin, u.approved, u.can_use_admin_key, u.created_at,
+      SELECT u.id, u.email, u.is_admin, u.approved, u.can_use_admin_key, u.created_at, u.last_seen_at,
              (u.gemini_key_enc IS NOT NULL) AS has_key,
              (SELECT count(*)::int FROM meetings m WHERE m.user_id = u.id) AS meeting_count
       FROM users u ORDER BY u.approved ASC, u.id`;

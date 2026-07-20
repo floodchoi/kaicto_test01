@@ -18,7 +18,8 @@ ALTER TABLE users
   ADD COLUMN IF NOT EXISTS gemini_key_enc    TEXT,
   ADD COLUMN IF NOT EXISTS gemini_key2_enc   TEXT,   -- 유료(예비) 키 — 무료 한도 소진 시 자동 전환
   ADD COLUMN IF NOT EXISTS shared_model      TEXT,   -- 관리자 키 사용자에게 강제할 요약 모델
-  ADD COLUMN IF NOT EXISTS shared_stt_model  TEXT;   -- 〃 전사 모델 (비우면 shared_model)
+  ADD COLUMN IF NOT EXISTS shared_stt_model  TEXT,   -- 〃 전사 모델 (비우면 shared_model)
+  ADD COLUMN IF NOT EXISTS last_seen_at      TIMESTAMPTZ; -- 마지막 접속(앱 로드) 시각
 
 -- 초기 관리자 지정 (이미 가입돼 있으면 승격, 미가입이면 가입 시 자동 지정)
 UPDATE users SET is_admin = true, approved = true WHERE email = 'floodchoi@gmail.com';

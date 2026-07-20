@@ -38,6 +38,11 @@ export default wrap(async function handler(req, res) {
 
   if (req.method !== "GET") return res.status(405).json({ error: "GET/PUT only" });
 
+  // 스키마 프로브 겸 마지막 접속 기록 — 새 컬럼/테이블이 빠진 DB면 여기서 오류가 나
+  // 화면 배너의 [🔧 마이그레이션 실행] 버튼으로 안내된다. (스키마 변경 시 프로브도 갱신할 것)
+  await sql`UPDATE users SET last_seen_at = now() WHERE id = ${userId}`;
+  await sql`SELECT 1 FROM project_members LIMIT 0`;
+
   const [me] = await sql`
     SELECT email, is_admin, can_use_admin_key, gemini_key_enc, gemini_key2_enc, shared_model, shared_stt_model
     FROM users WHERE id = ${userId}`;
