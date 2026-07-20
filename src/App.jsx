@@ -101,11 +101,16 @@ async function gfetch(url, opts, what, timeoutMs) {
   for (let attempt = 0; ; ) {
     try {
       await waitOnline();
+      const timeoutSig = timeoutMs ? AbortSignal.timeout(timeoutMs) : null;
       return await fetch(url, {
         ...opts,
-        signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : opts.signal,
+        signal:
+          timeoutSig && opts.signal
+            ? AbortSignal.any([opts.signal, timeoutSig])
+            : (timeoutSig ?? opts.signal),
       });
     } catch (e) {
+      if (opts.signal?.aborted) throw new Error("사용자가 중지했습니다."); // 중지는 재시도하지 않음
       if (!navigator.onLine) continue; // 전송 중 끊김 → 복구 대기 후 재시도 (시도 횟수 미소모)
       if (++attempt > 2)
         throw new Error(
@@ -117,7 +122,8 @@ async function gfetch(url, opts, what, timeoutMs) {
 }
 
 // 재개형(resumable) 업로드: start(세션 생성) → 바이트 업로드+finalize → ACTIVE 될 때까지 폴링.
-async function uploadAudioToGemini(file, apiKey, onStage) {
+// signal: 사용자 중지용 AbortSignal (선택)
+async function uploadAudioToGemini(file, apiKey, onStage, signal) {
   const mimeType = mimeFor(file);
   const base = "https://generativelanguage.googleapis.com";
 
@@ -133,6 +139,7 @@ async function uploadAudioToGemini(file, apiKey, onStage) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ file: { display_name: file.name } }),
+    signal,
   }, "업로드 준비", 30_000);
   if (!start.ok) throw new Error(await geminiErr(start));
   const uploadUrl = start.headers.get("x-goog-upload-url");
@@ -144,6 +151,7 @@ async function uploadAudioToGemini(file, apiKey, onStage) {
     // Content-Length는 브라우저가 File 크기로 자동 설정 (수동 지정은 무시됨)
     headers: { "X-Goog-Upload-Offset": "0", "X-Goog-Upload-Command": "upload, finalize" },
     body: file,
+    signal,
   }, "오디오 업로드", 600_000); // 큰 조각도 10분 안엔 끝나야 정상 — 멈춘 업로드 무한 대기 방지
   if (!up.ok) throw new Error(await geminiErr(up));
   let meta = (await up.json()).file;
@@ -152,7 +160,7 @@ async function uploadAudioToGemini(file, apiKey, onStage) {
   for (let i = 0; meta.state === "PROCESSING" && i < 60; i++) {
     onStage?.("오디오 처리 중…");
     await new Promise((r) => setTimeout(r, 1500));
-    const poll = await gfetch(`${base}/v1beta/${meta.name}`, { headers: { "x-goog-api-key": apiKey } }, "오디오 처리 확인", 30_000);
+    const poll = await gfetch(`${base}/v1beta/${meta.name}`, { headers: { "x-goog-api-key": apiKey }, signal }, "오디오 처리 확인", 30_000);
     if (!poll.ok) throw new Error(await geminiErr(poll));
     meta = await poll.json();
   }
@@ -169,9 +177,20 @@ KO: <한국어 번역>
 - 무음·잡음·배경음 구간은 건너뛴다. 같은 글자·단어·문장을 기계적으로 반복해 출력하지 않는다.
   실제로 같은 말이 여러 번 반복된 경우에도 한 번만 적고 "(반복)"이라고 표기해라.`;
 
-// 분할 전사 시 이어지는 조각용: 직전 조각 끝부분을 참고로 넘겨 문맥·화자 라벨 연속성 유지
-const contPrompt = (prevTail) =>
-  `${TRANSCRIBE_PROMPT}\n\n(참고) 이 오디오는 긴 녹음의 이어지는 조각이다. 직전 조각의 마지막 부분: "…${prevTail}"\n위 내용은 다시 쓰지 말고, 이 조각의 내용만 이어서 전사해라. 화자 번호는 직전 조각과 일관되게 붙여라.`;
+// 분할 전사 시 이어지는 조각용. ⚠️ 직전 조각의 전사 텍스트를 인용해 넘기면 안 된다 —
+// 모델이 그 인용문을 출력에 그대로 되풀이(echo)해서, 특정 문구가 조각마다 반복되는
+// 사고의 원인이 됐다. 조각 번호만 알려주고 텍스트는 일절 전달하지 않는다.
+const contPrompt = (idx, total) =>
+  `${TRANSCRIBE_PROMPT}\n\n(참고) 이 오디오는 긴 녹음을 ${total}개로 나눈 것 중 ${idx}번째 조각이다. 이전 조각들은 이미 전사가 끝났다. 오직 이 오디오에서 실제로 들리는 내용만 전사하고, 이전 조각 내용을 추측하거나 반복해서 쓰지 마라. 화자 라벨은 '화자1:', '화자2:' 형식을 그대로 사용해라.`;
+
+// 조각 이어붙일 때 경계 중복 제거: 새 조각 결과가 누적본 끝과 같은 텍스트로 시작하면 잘라냄
+function trimOverlap(acc, next) {
+  const max = Math.min(300, acc.length, next.length);
+  for (let k = max; k >= 15; k--) {
+    if (acc.endsWith(next.slice(0, k))) return next.slice(k).trimStart();
+  }
+  return next;
+}
 
 /* ── 오디오 분할: 브라우저에서 디코딩 → 16kHz 모노 → N분 WAV 조각 ──
    긴 파일은 조각마다 전사해 결과가 점진적으로 도착(준실시간 체감).      */
@@ -413,8 +432,10 @@ const joinGeminiParts = (body) =>
 
 const lastGeminiCandidate = (body) => (Array.isArray(body) ? body.at(-1) : body)?.candidates?.[0];
 
-async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, prompt = TRANSCRIBE_PROMPT) {
-  const ctrl = new AbortController(); // 응답이 멈추면 연결을 강제로 끊기 위한 컨트롤러
+async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, prompt = TRANSCRIBE_PROMPT, signal) {
+  const ctrl = new AbortController(); // 응답 정지·사용자 중지 시 연결을 강제로 끊기 위한 컨트롤러
+  if (signal?.aborted) throw new Error("전사를 중지했습니다.");
+  signal?.addEventListener("abort", () => ctrl.abort(), { once: true });
   const res = await gfetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`,
     {
@@ -471,6 +492,7 @@ async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, p
         }),
       ]));
     } catch (e) {
+      if (signal?.aborted) throw new Error("전사를 중지했습니다."); // 사용자 중지 — 재시도 대상 아님
       // 스트리밍 수신 도중 네트워크 끊김 또는 응답 정지
       throw new Error(
         `전사 수신이 중단되었습니다 (${e.message}). 네트워크 연결을 확인하고 다시 시도해주세요.`,
@@ -1261,7 +1283,7 @@ function Settings({ settings, me, onSave, onClose }) {
 }
 
 /* ── 전사 진행 패널: 새 회의록·목록 어디서든 진행 상황 표시 ── */
-function TransPanel({ trans, onGoto, onDismiss }) {
+function TransPanel({ trans, onGoto, onDismiss, onCancel }) {
   const liveRef = useRef(null);
   useEffect(() => {
     const el = liveRef.current;
@@ -1286,6 +1308,12 @@ function TransPanel({ trans, onGoto, onDismiss }) {
           {onGoto && (
             <button onClick={onGoto} className="font-medium text-teal-700 hover:underline">
               새 회의록으로 →
+            </button>
+          )}
+          {trans.status === "running" && onCancel && (
+            <button onClick={onCancel} title="전사 중지 — 완료된 조각까지의 텍스트는 입력란에 남습니다"
+              className="font-medium text-red-500 hover:underline">
+              ⏹ 중지
             </button>
           )}
           {trans.status !== "running" && onDismiss && (
@@ -1707,7 +1735,7 @@ function Help({ onClose }) {
 }
 
 /* ── 대시보드: 회의록 리스트 + 검색(키워드·날짜 범위) ─────── */
-function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, projects, projectFilter, setProjectFilter, onManageProjects, draftPreview }) {
+function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, onCancelTrans, projects, projectFilter, setProjectFilter, onManageProjects, draftPreview }) {
   const [meetings, setMeetings] = useState(null);
   const [q, setQ] = useState("");
   const [from, setFrom] = useState("");
@@ -1735,7 +1763,7 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, projects, 
   return (
     <div className="space-y-6">
       {/* 백그라운드 전사 진행 카드 — 목록에 있어도 진행 상황이 보임 */}
-      <TransPanel trans={trans} onGoto={onGotoNew} onDismiss={onDismissTrans} />
+      <TransPanel trans={trans} onGoto={onGotoNew} onDismiss={onDismissTrans} onCancel={onCancelTrans} />
 
       {/* 작성 중인 초안 — 새로고침·재방문 후에도 이어서 작성 */}
       {draftPreview && trans.status === "idle" && (
@@ -1964,7 +1992,7 @@ function NewMeeting({
   settings, draft, setDraft, trans, audioFile, setAudioFile,
   rec, meter, canAppend, onRecStart, onRecPause, onRecResume, onRecStop, recsVersion, onRecsChanged, onUseRec,
   projects,
-  onTranscribe, onDismissTrans, onDone, onCancel, onOpenSettings,
+  onTranscribe, onDismissTrans, onCancelTrans, onDone, onCancel, onOpenSettings,
 }) {
   // 이전 녹음이 있을 때 새 녹음 방식: "new"(대체) | "append"(이어붙임)
   const [recMode, setRecMode] = useState("new");
@@ -2252,7 +2280,7 @@ function NewMeeting({
       </div>
 
       {/* 전사 실시간 진행창 */}
-      <TransPanel trans={trans} onDismiss={onDismissTrans} />
+      <TransPanel trans={trans} onDismiss={onDismissTrans} onCancel={onCancelTrans} />
 
       <div className="flex items-center justify-between rounded-xl bg-slate-100 px-4 py-2.5 text-xs text-slate-500">
         <span>
@@ -2900,6 +2928,7 @@ export default function App() {
     return () => clearTimeout(t);
   }, [draft.title, draft.text]);
   const [trans, setTrans] = useState(IDLE_TRANS);
+  const transCancelRef = useRef(null); // 진행 중인 전사의 ⏹ 중지 컨트롤러
 
   // 오디오 파일(선택 또는 녹음 결과)도 App 보유 → 화면 이동에도 유지
   const [audioFile, setAudioFileState] = useState(null);
@@ -3134,6 +3163,11 @@ export default function App() {
     const addDelta = (delta) => setTrans((p) => ({ ...p, liveText: p.liveText + delta }));
     setTrans({ status: "running", stage: "오디오 분석 중…", liveText: "", fileName: audioFile.name, error: null });
 
+    // ⏹ 중지 버튼용 — 진행 중인 업로드·스트림을 끊고 조각 루프를 빠져나온다
+    const cancel = new AbortController();
+    transCancelRef.current = cancel;
+    const signal = cancel.signal;
+
     // 전사 수신 도중 문제가 생기면 해당 조각을 1회 자동 재시도:
     // - 네트워크 끊김/정지 → 복구 대기 후 재시도
     // - 반복 생성 루프 → 새 샘플링으로 재시도, 또 반복이면 받은 부분이라도 압축해 구제
@@ -3142,13 +3176,14 @@ export default function App() {
         collapseRepeats(partial).trimEnd() +
         "\n(⚠️ 이 구간은 반복 생성이 감지되어 전사가 불완전할 수 있습니다)";
       try {
-        return await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, addDelta, prompt);
+        return await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, addDelta, prompt, signal);
       } catch (e) {
+        if (signal.aborted) throw e; // 사용자 중지는 재시도하지 않음
         if (/반복 생성/.test(e.message)) {
           setStage("반복 생성 감지 — 조각 재시도 중…");
           resetLive();
           try {
-            return await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, addDelta, prompt);
+            return await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, addDelta, prompt, signal);
           } catch (e2) {
             const partial = e2.partial ?? e.partial;
             if (partial?.trim()) {
@@ -3163,17 +3198,18 @@ export default function App() {
         await waitOnline();
         resetLive(); // 부분 수신분 정리 후 다시
         setStage("연결 복구 — 재시도 중…");
-        return await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, addDelta, prompt);
+        return await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, addDelta, prompt, signal);
       }
     };
 
+    let acc = ""; // 누적 전사본 — 중지 시에도 받은 데까지 입력란에 반영하려고 밖에 둠
     try {
       if (!navigator.onLine) {
         setStage("네트워크 연결 대기 중… (녹음/파일은 안전하게 보관됩니다)");
         await waitOnline();
       }
 
-      // 긴 파일은 5분 조각으로 분할 → 조각마다 전사 결과가 도착 (준실시간 체감)
+      // 긴 파일은 10분 조각으로 분할 → 조각마다 전사 결과가 도착 (준실시간 체감)
       let chunks = null;
       try {
         setStage("오디오 분석 중…");
@@ -3186,26 +3222,25 @@ export default function App() {
         chunks = null; // 디코딩 실패(특이 코덱 등)·시간 초과 → 통짜 전사로 폴백
       }
 
-      let acc = "";
       if (chunks) {
         for (let i = 0; i < chunks.length; i++) {
+          if (signal.aborted) throw new Error("전사를 중지했습니다.");
           const label = `조각 ${i + 1}/${chunks.length}`;
           const { fileUri, mimeType } = await uploadAudioToGemini(chunks[i], sttKey, (s) =>
-            setStage(`${label} · ${s}`),
+            setStage(`${label} · ${s}`), signal,
           );
           setStage(`${label} · 전사 중…`);
-          // 직전 조각 끝을 문맥으로 넘기되, 반복 잔여물이면 넘기지 않는다
-          // (반복 텍스트가 참고문이 되면 다음 조각도 반복을 이어감 — 전파 차단)
-          const prevTail = collapseRepeats(acc.slice(-300)).slice(-200).trim();
-          const tailUsable = prevTail && new Set(prevTail.replace(/\s/g, "")).size >= 10;
+          // ⚠️ 직전 전사 텍스트를 프롬프트로 넘기지 않는다(모델이 인용문을 되풀이하는 반복 사고 원인).
+          // 조각 번호만 전달하고, 혹시 모를 경계 중복은 trimOverlap으로 잘라낸다.
           const t = collapseRepeats(
             await transcribeWithRetry(
               fileUri, mimeType,
-              tailUsable ? contPrompt(prevTail) : TRANSCRIBE_PROMPT,
+              i === 0 ? TRANSCRIBE_PROMPT : contPrompt(i + 1, chunks.length),
               () => setTrans((p) => ({ ...p, liveText: acc ? acc + "\n" : "" })),
             ),
           );
-          acc = acc ? acc.trimEnd() + "\n" + t.trim() : t.trim();
+          const clean = acc ? trimOverlap(acc, t.trim()) : t.trim();
+          acc = acc ? acc.trimEnd() + "\n" + clean : clean;
           setTrans((p) => ({ ...p, liveText: acc + "\n" }));
         }
       } else {
@@ -3215,7 +3250,7 @@ export default function App() {
           setStage("녹음 변환 중…");
           sendFile = await toWavFile(audioFile);
         }
-        const { fileUri, mimeType } = await uploadAudioToGemini(sendFile, sttKey, setStage);
+        const { fileUri, mimeType } = await uploadAudioToGemini(sendFile, sttKey, setStage, signal);
         setStage("전사 중…");
         acc = collapseRepeats(
           await transcribeWithRetry(fileUri, mimeType, TRANSCRIBE_PROMPT, () =>
@@ -3248,6 +3283,16 @@ export default function App() {
         setRecsVersion((v) => v + 1);
       }
     } catch (e) {
+      if (signal.aborted) {
+        // 사용자 중지: 받은 데까지 초안에 반영하고 조용히 종료
+        if (acc.trim())
+          setDraft((prev) => ({
+            ...prev,
+            text: prev.text.trim() ? prev.text.trimEnd() + "\n\n" + acc : acc,
+          }));
+        setTrans(IDLE_TRANS);
+        return;
+      }
       fail(e.message);
     }
   };
@@ -3373,6 +3418,7 @@ export default function App() {
             trans={trans}
             onGotoNew={() => setView({ name: "new" })}
             onDismissTrans={() => setTrans(IDLE_TRANS)}
+            onCancelTrans={() => transCancelRef.current?.abort()}
             projects={projects}
             projectFilter={projectFilter}
             setProjectFilter={setProjectFilter}
@@ -3413,6 +3459,7 @@ export default function App() {
             projects={projects}
             onTranscribe={startTranscription}
             onDismissTrans={() => setTrans(IDLE_TRANS)}
+            onCancelTrans={() => transCancelRef.current?.abort()}
             onDone={finishSave}
             onCancel={() => setView({ name: "list" })}
             onOpenSettings={() => setShowSettings(true)}
