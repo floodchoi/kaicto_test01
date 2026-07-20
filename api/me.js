@@ -19,6 +19,13 @@ export default wrap(async function handler(req, res) {
         UPDATE users SET gemini_key_enc = ${key ? encryptSecret(key) : null}
         WHERE id = ${userId}`;
     }
+    if ("gemini_api_key2" in b) {
+      const key = String(b.gemini_api_key2 ?? "").trim();
+      if (key.length > 300) return res.status(400).json({ error: "키가 너무 깁니다." });
+      await sql`
+        UPDATE users SET gemini_key2_enc = ${key ? encryptSecret(key) : null}
+        WHERE id = ${userId}`;
+    }
     if ("shared_model" in b || "shared_stt_model" in b) {
       const [u] = await sql`SELECT is_admin FROM users WHERE id = ${userId}`;
       if (!u?.is_admin) return res.status(403).json({ error: "공유 모델은 관리자만 지정할 수 있습니다." });
@@ -32,7 +39,7 @@ export default wrap(async function handler(req, res) {
   if (req.method !== "GET") return res.status(405).json({ error: "GET/PUT only" });
 
   const [me] = await sql`
-    SELECT email, is_admin, can_use_admin_key, gemini_key_enc, shared_model, shared_stt_model
+    SELECT email, is_admin, can_use_admin_key, gemini_key_enc, gemini_key2_enc, shared_model, shared_stt_model
     FROM users WHERE id = ${userId}`;
   if (!me) return res.status(401).json({ error: "로그인이 필요합니다." });
 
@@ -59,6 +66,8 @@ export default wrap(async function handler(req, res) {
     has_own_key: !!ownKey,
     using_admin_key: !ownKey && !!adminKey,
     gemini_key: ownKey ?? adminKey ?? "",
+    // 유료(예비) 키 — 본인 키가 429(무료 한도 소진)를 반환하면 브라우저가 자동 전환
+    gemini_key2: (me.gemini_key2_enc ? decryptSecret(me.gemini_key2_enc) : null) ?? "",
     // 관리자 본인: Settings 프리필용 / 관리자 키 사용자: 강제할 모델
     ...(me.is_admin && { shared_model: me.shared_model, shared_stt_model: me.shared_stt_model }),
     ...(!ownKey && adminKey ? adminModels : {}),

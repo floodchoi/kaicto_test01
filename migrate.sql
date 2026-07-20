@@ -16,6 +16,7 @@ ALTER TABLE users
   ADD COLUMN IF NOT EXISTS approved          BOOLEAN NOT NULL DEFAULT false,
   ADD COLUMN IF NOT EXISTS can_use_admin_key BOOLEAN NOT NULL DEFAULT false,
   ADD COLUMN IF NOT EXISTS gemini_key_enc    TEXT,
+  ADD COLUMN IF NOT EXISTS gemini_key2_enc   TEXT,   -- 유료(예비) 키 — 무료 한도 소진 시 자동 전환
   ADD COLUMN IF NOT EXISTS shared_model      TEXT,   -- 관리자 키 사용자에게 강제할 요약 모델
   ADD COLUMN IF NOT EXISTS shared_stt_model  TEXT;   -- 〃 전사 모델 (비우면 shared_model)
 

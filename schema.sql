@@ -9,6 +9,7 @@ CREATE TABLE users (
   approved          BOOLEAN NOT NULL DEFAULT false, -- 초대 코드 가입 or 관리자 승인 시 true
   can_use_admin_key BOOLEAN NOT NULL DEFAULT false, -- 관리자 API 키 사용 허용
   gemini_key_enc    TEXT,                   -- 사용자별 Gemini 키 (AES-GCM 암호화)
+  gemini_key2_enc   TEXT,                   -- 유료(예비) 키 — 무료 한도 소진 시 자동 전환
   shared_model      TEXT,                   -- (관리자 행) 관리자 키 사용자에게 강제할 요약 모델
   shared_stt_model  TEXT,                   -- (관리자 행) 〃 전사 모델 (비우면 shared_model)
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()

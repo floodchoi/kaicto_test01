@@ -44,6 +44,7 @@ async function listGeminiModels(apiKey) {
 // 팀 공유·다중 사용자로 가면 서버 측 암호화 저장으로 전환.
 const loadSettings = () => ({
   apiKey: "", // 사용자별 서버 저장 — 로그인 후 /api/me에서 하이드레이션
+  apiKey2: "", // 유료(예비) 키 — 무료 한도 소진 시 자동 전환 (서버 저장)
 
   model: localStorage.getItem("gemini_model") ?? MODELS[0].id,
   // 요약 제공자: "gemini" | "local"(OpenAI 호환 로컬 서버)
@@ -94,6 +95,18 @@ const waitOnline = () =>
     ? Promise.resolve()
     : new Promise((r) => window.addEventListener("online", r, { once: true }));
 
+// ── 무료→유료 Gemini 키 자동 전환 ──────────────────────────
+// 무료 키가 429(한도 소진)를 반환하면 예비(유료) 키로 같은 요청을 재시도하고,
+// 이후의 모든 호출도 이 세션 동안 유료 키를 사용한다. 모든 Gemini 호출이
+// gfetch를 지나므로 전사·요약·제목 추천·업로드 전부에 적용된다.
+const keyPool = { free: "", paid: "", usingPaid: false, onSwitch: null };
+function setKeyPool(free, paid, onSwitch) {
+  if (keyPool.free !== (free ?? "") || keyPool.paid !== (paid ?? "")) keyPool.usingPaid = false;
+  keyPool.free = free ?? "";
+  keyPool.paid = paid ?? "";
+  keyPool.onSwitch = onSwitch;
+}
+
 // Gemini fetch 래퍼: 오프라인이면 복구까지 대기, 일시 오류는 최대 2회 재시도.
 // timeoutMs를 주면 해당 시간 안에 응답이 없을 때 끊고 재시도 (멈춘 연결이 무한 대기하지 않게).
 // 그래도 실패하면 어느 단계였는지 + 흔한 원인을 담아 보고한다.
@@ -101,14 +114,27 @@ async function gfetch(url, opts, what, timeoutMs) {
   for (let attempt = 0; ; ) {
     try {
       await waitOnline();
+      // 요청이 무료 키를 쓰는데 이미 유료 전환된 상태면 키를 바꿔치기
+      const reqKey = opts.headers?.["x-goog-api-key"];
+      const swap = reqKey && reqKey === keyPool.free && keyPool.usingPaid && keyPool.paid;
+      const useOpts = swap
+        ? { ...opts, headers: { ...opts.headers, "x-goog-api-key": keyPool.paid } }
+        : opts;
       const timeoutSig = timeoutMs ? AbortSignal.timeout(timeoutMs) : null;
-      return await fetch(url, {
-        ...opts,
+      const res = await fetch(url, {
+        ...useOpts,
         signal:
           timeoutSig && opts.signal
             ? AbortSignal.any([opts.signal, timeoutSig])
             : (timeoutSig ?? opts.signal),
       });
+      // 무료 키 한도 소진(429) → 유료 키로 전환 후 같은 요청 즉시 재시도 (1회성 전환)
+      if (res.status === 429 && reqKey && reqKey === keyPool.free && keyPool.paid && !keyPool.usingPaid) {
+        keyPool.usingPaid = true;
+        keyPool.onSwitch?.();
+        continue;
+      }
+      return res;
     } catch (e) {
       if (opts.signal?.aborted) throw new Error("사용자가 중지했습니다."); // 중지는 재시도하지 않음
       if (!navigator.onLine) continue; // 전송 중 끊김 → 복구 대기 후 재시도 (시도 횟수 미소모)
@@ -1003,6 +1029,7 @@ const INPUT_CLS =
 
 function Settings({ settings, me, onSave, onClose }) {
   const [apiKey, setApiKey] = useState(settings.apiKey);
+  const [apiKey2, setApiKey2] = useState(settings.apiKey2 ?? "");
   const [model, setModel] = useState(settings.model);
   const [summaryProvider, setSummaryProvider] = useState(settings.summaryProvider);
   const [localBaseUrl, setLocalBaseUrl] = useState(settings.localBaseUrl);
@@ -1069,6 +1096,7 @@ function Settings({ settings, me, onSave, onClose }) {
   const save = async () => {
     const next = {
       apiKey: apiKey.trim(),
+      apiKey2: apiKey2.trim(),
       model,
       summaryProvider,
       localBaseUrl: localBaseUrl.trim(),
@@ -1085,12 +1113,13 @@ function Settings({ settings, me, onSave, onClose }) {
     localStorage.setItem("gemini_stt_model", next.sttModel);
     onSave(next);
 
-    // 서버 저장분(계정별 키 · 관리자 공유 모델) — 바뀐 경우에만 호출
+    // 서버 저장분(계정별 키 · 예비 키 · 관리자 공유 모델) — 바뀐 경우에만 호출
     const keyChanged = next.apiKey !== (settings.apiKey ?? "").trim();
+    const key2Changed = next.apiKey2 !== (settings.apiKey2 ?? "").trim();
     const sharedChanged =
       me?.is_admin &&
       (sharedModel.trim() !== (me.shared_model ?? "") || sharedStt.trim() !== (me.shared_stt_model ?? ""));
-    if (keyChanged || sharedChanged) {
+    if (keyChanged || key2Changed || sharedChanged) {
       setSaving(true);
       setSaveError(null);
       try {
@@ -1098,6 +1127,7 @@ function Settings({ settings, me, onSave, onClose }) {
           method: "PUT",
           body: JSON.stringify({
             ...(keyChanged && { gemini_api_key: next.apiKey }),
+            ...(key2Changed && { gemini_api_key2: next.apiKey2 }),
             ...(sharedChanged && { shared_model: sharedModel.trim(), shared_stt_model: sharedStt.trim() }),
           }),
         });
@@ -1140,6 +1170,15 @@ function Settings({ settings, me, onSave, onClose }) {
         {me?.can_use_admin_key && me?.has_own_key && (
           <p className="mt-1 text-xs text-slate-400">관리자 키 사용이 허용된 계정입니다 — 본인 키를 비우면 관리자 키로 전환됩니다.</p>
         )}
+
+        {/* 유료(예비) 키 — 무료 한도 소진 시 자동 전환 */}
+        <label className="mt-4 block text-sm font-medium text-slate-700">유료(예비) API 키 (선택)</label>
+        <input type="password" value={apiKey2} onChange={(e) => setApiKey2(e.target.value)}
+          placeholder="무료 키 한도 소진 시 자동으로 전환할 키" className={INPUT_CLS} />
+        <p className="mt-1 text-xs text-slate-400">
+          위 키가 무료 등급이라면, 한도 소진(429) 시 <b>이 키로 자동 전환</b>해 전사·요약을 계속합니다.
+          전환되면 화면에 안내가 표시됩니다.
+        </p>
 
         {/* 실시간 모델 목록 상태 + 새로고침 */}
         <div className="mt-2 flex items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2">
@@ -1716,7 +1755,8 @@ function Help({ onClose }) {
           <p className={p}>
             · <b>Gemini API</b>: ⚙️ 설정 → Google AI Studio에서 키 발급 → 붙여넣고 저장. 관리자가 허용한
             회원은 본인 키 없이 <b>관리자 키</b>를 사용할 수 있습니다 — 이 경우 모델은 관리자가 지정한
-            모델로 고정됩니다.<br />
+            모델로 고정됩니다. 무료 키와 <b>유료(예비) 키</b>를 함께 등록하면 무료 한도 소진 시
+            자동으로 유료 키로 전환됩니다.<br />
             · <b>로컬 LLM(요약)</b>: Ollama·LM Studio 등을 이 PC에서 실행 → ⚙️ 설정 → 요약 제공자
             "로컬 LLM" → 서버 주소(예: LM Studio <code>http://localhost:1234/v1</code>) 입력 →
             "🔄 로컬 모델 불러오기"로 모델 선택. 단, 오디오 전사는 항상 Gemini를 사용합니다.
@@ -2882,6 +2922,7 @@ export default function App() {
       setSettings((p) => ({
         ...p,
         apiKey: m.gemini_key,
+        apiKey2: m.gemini_key2 ?? "",
         ...(m.using_admin_key && m.admin_model && {
           model: m.admin_model,
           sttModel: m.admin_stt_model ?? "",
@@ -2929,6 +2970,12 @@ export default function App() {
   }, [draft.title, draft.text]);
   const [trans, setTrans] = useState(IDLE_TRANS);
   const transCancelRef = useRef(null); // 진행 중인 전사의 ⏹ 중지 컨트롤러
+
+  // 무료→유료 키 자동 전환: 키가 바뀔 때마다 풀 갱신, 전환 시 안내 배너 표시
+  const [keySwitched, setKeySwitched] = useState(false);
+  useEffect(() => {
+    setKeyPool(settings.apiKey, settings.apiKey2, () => setKeySwitched(true));
+  }, [settings.apiKey, settings.apiKey2]);
 
   // 오디오 파일(선택 또는 녹음 결과)도 App 보유 → 화면 이동에도 유지
   const [audioFile, setAudioFileState] = useState(null);
@@ -3379,6 +3426,14 @@ export default function App() {
         </div>
       </header>
       <main className="mx-auto max-w-3xl px-4 py-8">
+        {keySwitched && (
+          <div className="mb-4 flex items-center gap-2 rounded-xl bg-teal-50 px-4 py-2.5 text-sm text-teal-800">
+            <span className="min-w-0 flex-1">
+              ℹ️ 무료 API 한도가 소진되어 <b>유료(예비) 키로 자동 전환</b>했습니다. 이 세션 동안 유지됩니다.
+            </span>
+            <button onClick={() => setKeySwitched(false)} title="닫기" className="text-teal-500 hover:text-teal-700">✕</button>
+          </div>
+        )}
         {meError && (
           <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl bg-amber-50 px-4 py-2.5 text-sm text-amber-700">
             <span>
