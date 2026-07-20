@@ -33,6 +33,14 @@ CREATE TABLE projects (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- 프로젝트 멤버 — 지정된 회원은 프로젝트의 모든 회의록을 열람·수정 가능
+CREATE TABLE project_members (
+  project_id INT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  user_id    INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  added_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (project_id, user_id)
+);
+
 CREATE TABLE meetings (
   id         SERIAL PRIMARY KEY,
   user_id    INT REFERENCES users(id) ON DELETE CASCADE,

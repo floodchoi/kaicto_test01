@@ -10,6 +10,7 @@ import meetings from "./api/meetings.js";
 import actionItems from "./api/action-items.js";
 import meetingById from "./api/meetings/[id].js";
 import migrate from "./api/migrate.js";
+import users from "./api/users.js";
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost");
@@ -33,6 +34,7 @@ const server = http.createServer(async (req, res) => {
     else if (url.pathname === "/api/action-items") await actionItems(req, res);
     else if (url.pathname === "/api/meetings") await meetings(req, res);
     else if (url.pathname === "/api/migrate") await migrate(req, res);
+    else if (url.pathname === "/api/users") await users(req, res);
     else if (idMatch) ((req.query.id = idMatch[1]), await meetingById(req, res));
     else res.status(404).json({ error: "not found" });
   } catch (e) {

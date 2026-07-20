@@ -41,6 +41,14 @@ CREATE TABLE IF NOT EXISTS projects (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- 3-1) 프로젝트 멤버 — 지정된 회원은 프로젝트의 모든 회의록을 열람·수정 가능
+CREATE TABLE IF NOT EXISTS project_members (
+  project_id INT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  user_id    INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  added_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (project_id, user_id)
+);
+
 -- 4) meetings (원본 테이블은 초기 schema.sql로 생성돼 있다고 가정)
 ALTER TABLE meetings
   ADD COLUMN IF NOT EXISTS user_id    INT REFERENCES users(id) ON DELETE CASCADE,

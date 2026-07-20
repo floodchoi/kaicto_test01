@@ -1,10 +1,11 @@
 import { sql } from "./_db.js";
 import { wrap } from "./_wrap.js";
 import { requireAuth } from "./_auth.js";
+import { editCond } from "./meetings.js";
 
 const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
 
-// GET /api/action-items?q=&from=&to=&project= — 본인 회의록의 액션 아이템 전체
+// GET /api/action-items?q=&from=&to=&project= — 내 회의록 + 내가 멤버인 프로젝트 회의록의 액션 아이템
 // (공개 회의록의 항목은 해당 회의록 상세에서 열람 — 여기는 내 할 일 관리 용도)
 export default wrap(async function handler(req, res) {
   const userId = requireAuth(req, res);
@@ -22,7 +23,7 @@ export default wrap(async function handler(req, res) {
     FROM action_items a
     JOIN meetings m ON m.id = a.meeting_id
     LEFT JOIN projects p ON p.id = m.project_id
-    WHERE m.user_id = ${userId}
+    WHERE ${editCond(userId)}
     ${q ? sql`AND (a.task ILIKE ${"%" + q + "%"} OR a.assignee ILIKE ${"%" + q + "%"} OR m.title ILIKE ${"%" + q + "%"})` : sql``}
     ${isDate(from) ? sql`AND m.created_at >= ${from}::date` : sql``}
     ${isDate(to) ? sql`AND m.created_at < ${to}::date + 1` : sql``}

@@ -4,14 +4,30 @@ import { requireAuth, encryptText } from "./_auth.js";
 
 const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
 
-// 사용자가 쓸 수 있는 프로젝트인지 (본인 소유 또는 공유). 아니면 null 반환.
+// 사용자가 쓸 수 있는 프로젝트인지 (본인 소유·공유·멤버). 아니면 null 반환.
 export async function resolveProjectId(userId, raw) {
   const id = Number(raw);
   if (!Number.isInteger(id) || id <= 0) return null;
   const [p] = await sql`
-    SELECT id FROM projects WHERE id = ${id} AND (owner_id = ${userId} OR is_shared = true)`;
+    SELECT id FROM projects
+    WHERE id = ${id} AND (owner_id = ${userId} OR is_shared = true
+      OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = projects.id AND pm.user_id = ${userId}))`;
   return p?.id ?? null;
 }
+
+// 프로젝트를 통한 접근: 프로젝트 소유자·멤버는 그 프로젝트의 모든 회의록에 접근 (t = 테이블 별칭)
+const projCond = (userId, t) => sql`(${sql(t)}.project_id IS NOT NULL AND (
+  EXISTS (SELECT 1 FROM projects _pp WHERE _pp.id = ${sql(t)}.project_id AND _pp.owner_id = ${userId})
+  OR EXISTS (SELECT 1 FROM project_members _pm
+              WHERE _pm.project_id = ${sql(t)}.project_id AND _pm.user_id = ${userId})))`;
+
+// 열람 가능: 본인 것 · 전체 공개 · 프로젝트 소유자/멤버
+export const seeCond = (userId, t = "m") =>
+  sql`(${sql(t)}.user_id = ${userId} OR ${sql(t)}.visibility = 'workspace' OR ${projCond(userId, t)})`;
+
+// 수정 가능: 본인 것 · 프로젝트 소유자/멤버
+export const editCond = (userId, t = "m") =>
+  sql`(${sql(t)}.user_id = ${userId} OR ${projCond(userId, t)})`;
 
 export default wrap(async function handler(req, res) {
   const userId = requireAuth(req, res);
@@ -61,7 +77,7 @@ export default wrap(async function handler(req, res) {
     FROM meetings m
     LEFT JOIN users u ON u.id = m.user_id
     LEFT JOIN projects p ON p.id = m.project_id
-    WHERE (m.user_id = ${userId} OR m.visibility = 'workspace')
+    WHERE ${seeCond(userId)}
     ${q ? sql`AND (m.title ILIKE ${"%" + q + "%"} OR array_to_string(m.summary, ' ') ILIKE ${"%" + q + "%"} OR ${q} = ANY(m.tags))` : sql``}
     ${isDate(from) ? sql`AND m.created_at >= ${from}::date` : sql``}
     ${isDate(to) ? sql`AND m.created_at < ${to}::date + 1` : sql``}

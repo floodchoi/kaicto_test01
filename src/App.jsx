@@ -1449,11 +1449,80 @@ function ProjectSelect({ projects, value, onChange, mode = "filter", className =
 }
 
 /* ── 프로젝트 관리 모달 ─────────────────────────────────────── */
+/* 프로젝트 멤버 관리: 이메일 검색 → 선택해 지정. 멤버는 프로젝트의 모든 회의록을 열람·수정 */
+function ProjectMembers({ p, onChanged }) {
+  const [q, setQ] = useState("");
+  const [results, setResults] = useState([]);
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    if (q.trim().length < 2) {
+      setResults([]);
+      return;
+    }
+    const t = setTimeout(
+      () => api(`/api/users?q=${encodeURIComponent(q.trim())}`).then(setResults).catch(() => {}),
+      250,
+    );
+    return () => clearTimeout(t);
+  }, [q]);
+
+  const patch = async (body) => {
+    setError(null);
+    try {
+      await api("/api/projects", { method: "PATCH", body: JSON.stringify({ projectId: p.id, ...body }) });
+      setQ("");
+      setResults([]);
+      onChanged();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const memberIds = new Set((p.members ?? []).map((m) => m.id));
+  const candidates = results.filter((u) => !memberIds.has(u.id));
+  return (
+    <div className="mb-1.5 ml-6 rounded-lg bg-slate-50 p-3">
+      <div className="flex flex-wrap gap-1.5">
+        {(p.members ?? []).length === 0 && <span className="text-xs text-slate-400">지정된 멤버가 없습니다.</span>}
+        {(p.members ?? []).map((mem) => (
+          <span key={mem.id}
+            className="flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-0.5 text-xs text-slate-600">
+            {mem.email}
+            <button onClick={() => patch({ removeUserId: mem.id })} title="멤버 해제"
+              className="text-slate-400 hover:text-red-500">✕</button>
+          </span>
+        ))}
+      </div>
+      <input value={q} onChange={(e) => setQ(e.target.value)}
+        placeholder="🔍 이메일로 회원 검색 (2자 이상)"
+        className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm outline-none focus:border-teal-500" />
+      {candidates.length > 0 && (
+        <ul className="mt-1 overflow-hidden rounded-lg border border-slate-200 bg-white">
+          {candidates.map((u) => (
+            <li key={u.id}>
+              <button onClick={() => patch({ addUserId: u.id })}
+                className="w-full px-3 py-1.5 text-left text-sm text-slate-700 hover:bg-teal-50">
+                + {u.email}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {q.trim().length >= 2 && candidates.length === 0 && (
+        <p className="mt-1 text-xs text-slate-400">검색 결과가 없습니다.</p>
+      )}
+      <p className="mt-2 text-xs text-slate-400">멤버는 이 프로젝트의 모든 회의록을 보고 수정할 수 있습니다.</p>
+      {error && <p className="mt-1 text-xs text-red-500">⚠️ {error}</p>}
+    </div>
+  );
+}
+
 function ProjectManager({ me, projects, onChanged, onClose }) {
   const [name, setName] = useState("");
   const [shared, setShared] = useState(false);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [membersOpen, setMembersOpen] = useState(null); // 멤버 패널이 열린 프로젝트 id
 
   const create = async () => {
     if (!name.trim()) return;
@@ -1489,6 +1558,7 @@ function ProjectManager({ me, projects, onChanged, onClose }) {
         <h2 className="text-lg font-bold text-slate-800">프로젝트 관리</h2>
         <p className="mt-1 text-xs text-slate-500">
           개인 프로젝트는 나만 사용합니다. 👥 공유 프로젝트(관리자 생성)는 모든 회원이 지정할 수 있습니다.
+          <b> 👤 멤버</b>를 지정하면 그 회원이 프로젝트의 회의록을 함께 보고 수정할 수 있습니다.
         </p>
 
         <div className="mt-4 flex gap-2">
@@ -1513,20 +1583,34 @@ function ProjectManager({ me, projects, onChanged, onClose }) {
 
         <ul className="mt-4 space-y-1.5">
           {projects.length === 0 && <li className="text-sm text-slate-400">아직 프로젝트가 없습니다.</li>}
-          {projects.map((p) => (
-            <li key={p.id} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-slate-50">
-              <span className="min-w-0 flex-1 truncate text-slate-700">
-                {p.is_shared ? "👥 " : "📁 "}{p.name}
-                <span className="ml-2 text-xs text-slate-400">회의록 {p.meeting_count}개</span>
-              </span>
-              {(p.is_mine || (me?.is_admin && p.is_shared)) && (
-                <button onClick={() => remove(p)} title="프로젝트 삭제 (회의록은 미분류로)"
-                  className="text-slate-400 hover:text-red-500">
-                  🗑
-                </button>
-              )}
-            </li>
-          ))}
+          {projects.map((p) => {
+            const canManage = p.is_mine || (me?.is_admin && p.is_shared);
+            return (
+              <li key={p.id}>
+                <div className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-slate-50">
+                  <span className="min-w-0 flex-1 truncate text-slate-700">
+                    {p.is_shared ? "👥 " : "📁 "}{p.name}
+                    <span className="ml-2 text-xs text-slate-400">회의록 {p.meeting_count}개</span>
+                    {p.is_member && <span className="ml-2 text-xs text-teal-600">멤버로 참여 중</span>}
+                  </span>
+                  {canManage && (
+                    <button onClick={() => setMembersOpen(membersOpen === p.id ? null : p.id)}
+                      title="멤버 지정 — 함께 보고 수정할 회원"
+                      className={`text-xs font-medium hover:underline ${membersOpen === p.id ? "text-teal-700" : "text-slate-500"}`}>
+                      👤 멤버 {(p.members ?? []).length}
+                    </button>
+                  )}
+                  {canManage && (
+                    <button onClick={() => remove(p)} title="프로젝트 삭제 (회의록은 미분류로)"
+                      className="text-slate-400 hover:text-red-500">
+                      🗑
+                    </button>
+                  )}
+                </div>
+                {canManage && membersOpen === p.id && <ProjectMembers p={p} onChanged={onChanged} />}
+              </li>
+            );
+          })}
         </ul>
 
         <div className="mt-5 flex justify-end">
@@ -2713,7 +2797,7 @@ function Detail({ id, onBack, projects }) {
   }, [id]);
 
   const toggle = async (item) => {
-    if (!m.is_owner) return; // 공개 회의록 열람자는 토글 불가 (서버에서도 차단)
+    if (!m.can_edit) return; // 공개 회의록 열람자는 토글 불가 (서버에서도 차단)
     setM((p) => ({
       ...p,
       action_items: p.action_items.map((a) => (a.id === item.id ? { ...a, done: !a.done } : a)),
@@ -2742,7 +2826,7 @@ function Detail({ id, onBack, projects }) {
         <button onClick={onBack} className="text-sm font-medium text-teal-700 hover:underline">
           ← 목록으로
         </button>
-        {m.is_owner && (
+        {m.can_edit && (
           <div className="flex gap-2">
             <button
               onClick={() => setEditing(true)}
@@ -2750,7 +2834,7 @@ function Detail({ id, onBack, projects }) {
             >
               ✏️ 수정
             </button>
-            <button
+            {m.is_owner && <button
               onClick={async () => {
                 if (!confirm(`"${m.title}" 회의록을 삭제할까요?\n액션 아이템도 함께 삭제되며 되돌릴 수 없습니다.`)) return;
                 setDeleting(true);
@@ -2766,7 +2850,7 @@ function Detail({ id, onBack, projects }) {
               className="rounded-lg border border-red-200 bg-white px-3 py-1.5 text-sm font-medium text-red-500 hover:bg-red-50 disabled:opacity-40"
             >
               {deleting ? "삭제 중…" : "🗑 삭제"}
-            </button>
+            </button>}
           </div>
         )}
       </div>
@@ -2833,8 +2917,8 @@ function Detail({ id, onBack, projects }) {
           )}
           {m.action_items.map((a) => (
             <li key={a.id}>
-              <label className={`flex items-start gap-3 rounded-xl px-3 py-2.5 ${m.is_owner ? "cursor-pointer hover:bg-slate-50" : ""}`}>
-                <input type="checkbox" checked={a.done} onChange={() => toggle(a)} disabled={!m.is_owner}
+              <label className={`flex items-start gap-3 rounded-xl px-3 py-2.5 ${m.can_edit ? "cursor-pointer hover:bg-slate-50" : ""}`}>
+                <input type="checkbox" checked={a.done} onChange={() => toggle(a)} disabled={!m.can_edit}
                   className="mt-0.5 size-4 accent-teal-700 disabled:opacity-50" />
                 <div className="min-w-0">
                   <p className={`text-sm ${a.done ? "text-slate-400 line-through" : "text-slate-700"}`}>
