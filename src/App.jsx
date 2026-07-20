@@ -669,17 +669,60 @@ const hangulRatio = (s) => {
 const stripFences = (s) =>
   s.replace(/^\s*```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
 
-// 모델 응답에서 JSON을 관대하게 추출 — 코드펜스, <think> 사고 블록, JSON 앞뒤 잡담까지 제거.
-// (reasoning 모델은 "<think>…</think>{JSON}" 처럼 답하기도 해 JSON.parse가 그대로는 실패한다)
+// 중간에 잘린 JSON 복구: 열린 문자열은 닫고, 값 없는 키에는 null을 채우고,
+// 괄호를 닫아 파싱한다. 실패하면 끝을 한 글자씩 줄여가며 재시도 (최대 500회).
+// (로컬 서버가 최대 출력 토큰에 걸려 응답이 끊기는 경우 부분 결과라도 살린다)
+function repairJson(raw) {
+  const start = raw.indexOf("{");
+  if (start === -1) throw new Error("JSON 없음");
+  const t = raw.slice(start);
+
+  const tryClose = (s) => {
+    let inStr = false, esc = false;
+    const closers = [];
+    for (const ch of s) {
+      if (esc) { esc = false; continue; }
+      if (inStr) {
+        if (ch === "\\") esc = true;
+        else if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') inStr = true;
+      else if (ch === "{") closers.push("}");
+      else if (ch === "[") closers.push("]");
+      else if (ch === "}" || ch === "]") closers.pop();
+    }
+    let fixed = s.trimEnd().replace(/,$/, "") + (inStr ? '"' : "");
+    if (/:\s*$/.test(fixed)) fixed += "null"; // 값 없이 끝난 키
+    try {
+      return JSON.parse(fixed + closers.reverse().join(""));
+    } catch {
+      return null;
+    }
+  };
+
+  for (let end = t.length, tries = 0; end > 1 && tries < 500; end--, tries++) {
+    const r = tryClose(t.slice(0, end));
+    if (r) return r;
+  }
+  throw new Error("JSON 복구 실패");
+}
+
+// 모델 응답에서 JSON을 관대하게 추출 — 코드펜스, <think> 사고 블록, JSON 앞뒤 잡담,
+// 중간에 잘린 응답까지 순서대로 시도한다.
 function extractJson(s) {
   const t = stripFences(String(s ?? "").replace(/<think>[\s\S]*?<\/think>/gi, "").trim());
   try {
     return JSON.parse(t);
-  } catch { /* 아래에서 중괄호 구간만 재시도 */ }
+  } catch { /* 중괄호 구간만 재시도 */ }
   const a = t.indexOf("{");
   const b = t.lastIndexOf("}");
-  if (a === -1 || b <= a) throw new Error("JSON 없음");
-  return JSON.parse(t.slice(a, b + 1));
+  if (a !== -1 && b > a) {
+    try {
+      return JSON.parse(t.slice(a, b + 1));
+    } catch { /* 잘린 응답 복구 재시도 */ }
+  }
+  return repairJson(t); // 실패 시 여기서 throw
 }
 
 // onLog(줄, replace?) — 진행 로그 콜백. replace=true면 직전 줄을 갱신(수신 글자수 등).
@@ -783,6 +826,7 @@ async function summarizeWithLocal(text, baseUrl, model, onLog, koRetry = false) 
         model,
         stream: true, // 진행 상황을 실시간으로 받기 위해 스트리밍
         temperature: 0.2,
+        max_tokens: 4096, // 일부 로컬 서버는 기본 한도가 작아 JSON이 중간에 잘림
         messages: [
           { role: "system", content: SUMMARY_SYSTEM + "\n\n" + SUMMARY_JSON_HINT },
           { role: "user", content: summaryUserPrompt(text, koRetry) },
@@ -853,8 +897,11 @@ async function summarizeWithLocal(text, baseUrl, model, onLog, koRetry = false) 
   try {
     return extractJson(content);
   } catch {
+    const looksTruncated = /[{[,:"]\s*$/.test(stripFences(content).trimEnd());
     throw new Error(
-      `로컬 모델이 올바른 JSON을 반환하지 않았습니다 (수신 ${content.length.toLocaleString()}자, 앞부분: "${content.slice(0, 80)}…"). 더 큰 모델을 쓰거나 다시 시도하세요.`,
+      looksTruncated
+        ? `로컬 모델 응답이 중간에 잘렸습니다 (수신 ${content.length.toLocaleString()}자). 로컬 서버(LM Studio·Ollama)의 최대 출력 토큰(max tokens) 설정을 늘리거나, 컨텍스트 길이가 더 큰 모델을 사용해주세요.`
+        : `로컬 모델이 올바른 JSON을 반환하지 않았습니다 (수신 ${content.length.toLocaleString()}자, 앞부분: "${content.slice(0, 80)}…"). 더 큰 모델을 쓰거나 다시 시도하세요.`,
     );
   }
 }
