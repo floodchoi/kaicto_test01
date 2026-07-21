@@ -56,38 +56,46 @@ export default wrap(async function handler(req, res) {
     meeting.raw_text = text; // 응답은 평문으로
     await logAct(userId, "meeting_create", `#${meeting.id} ${title}`);
 
-    // 연동: 설정된 경우 Notion 페이지 생성 + Dooray 업무 등록.
-    // 실패해도 회의록 저장은 이미 완료 — 결과만 응답에 담아 화면에 알린다.
+    // 연동: 설정돼 있고, 이 회의록에서 켜져 있으면(기본 켜짐) Notion 페이지 생성 + Dooray 업무 등록.
+    // ⚠️ 어떤 오류가 나도(설정 컬럼 미존재 = 마이그레이션 미실행 포함) 회의록 저장은
+    // 이미 완료된 상태를 깨지 않는다 — 결과만 응답에 담아 화면에 알린다.
     const integrations = {};
-    const [cfg] = await sql`
-      SELECT notion_token_enc, notion_target_id, notion_target_type, dooray_token_enc, dooray_project_id
-      FROM users WHERE id = ${userId}`;
-    const meetingData = { title, text, summary: summary ?? [], agenda: agenda ?? [], action_items: action_items ?? [], tags: tags ?? [] };
-    if (cfg?.notion_token_enc && cfg?.notion_target_id) {
-      try {
-        const url = await pushToNotion(
-          { token: decryptSecret(cfg.notion_token_enc), targetId: cfg.notion_target_id, targetType: cfg.notion_target_type ?? "database" },
-          meetingData,
-        );
-        integrations.notion = { ok: true, url };
-        await logAct(userId, "notion_sync", `#${meeting.id} ${title}${url ? ` → ${url}` : ""}`);
-      } catch (e) {
-        integrations.notion = { ok: false, error: e.message };
-        await logAct(userId, "notion_error", `#${meeting.id} ${e.message}`);
+    try {
+      const wantNotion = req.body?.notion !== false; // 회의록별 선택 (미전달 시 켜짐)
+      const wantDooray = req.body?.dooray !== false;
+      const [cfg] = await sql`
+        SELECT notion_token_enc, notion_target_id, notion_target_type, dooray_token_enc, dooray_project_id
+        FROM users WHERE id = ${userId}`;
+      const meetingData = { title, text, summary: summary ?? [], agenda: agenda ?? [], action_items: action_items ?? [], tags: tags ?? [] };
+      if (wantNotion && cfg?.notion_token_enc && cfg?.notion_target_id) {
+        try {
+          const url = await pushToNotion(
+            { token: decryptSecret(cfg.notion_token_enc), targetId: cfg.notion_target_id, targetType: cfg.notion_target_type ?? "database" },
+            meetingData,
+          );
+          integrations.notion = { ok: true, url };
+          await logAct(userId, "notion_sync", `#${meeting.id} ${title}${url ? ` → ${url}` : ""}`);
+        } catch (e) {
+          integrations.notion = { ok: false, error: e.message };
+          await logAct(userId, "notion_error", `#${meeting.id} ${e.message}`);
+        }
       }
-    }
-    if (cfg?.dooray_token_enc && cfg?.dooray_project_id && meetingData.action_items.length) {
-      try {
-        const r = await pushTasksToDooray(
-          { token: decryptSecret(cfg.dooray_token_enc), projectId: cfg.dooray_project_id },
-          meetingData,
-        );
-        integrations.dooray = { ok: true, ...r };
-        await logAct(userId, "dooray_sync", `#${meeting.id} 업무 ${r.created}건 등록${r.failed ? `, ${r.failed}건 실패` : ""}`);
-      } catch (e) {
-        integrations.dooray = { ok: false, error: e.message };
-        await logAct(userId, "dooray_error", `#${meeting.id} ${e.message}`);
+      if (wantDooray && cfg?.dooray_token_enc && cfg?.dooray_project_id && meetingData.action_items.length) {
+        try {
+          const r = await pushTasksToDooray(
+            { token: decryptSecret(cfg.dooray_token_enc), projectId: cfg.dooray_project_id },
+            meetingData,
+          );
+          integrations.dooray = { ok: true, ...r };
+          await logAct(userId, "dooray_sync", `#${meeting.id} 업무 ${r.created}건 등록${r.failed ? `, ${r.failed}건 실패` : ""}`);
+        } catch (e) {
+          integrations.dooray = { ok: false, error: e.message };
+          await logAct(userId, "dooray_error", `#${meeting.id} ${e.message}`);
+        }
       }
+    } catch (e) {
+      // 연동 설정 조회 자체가 실패(예: 마이그레이션 미실행) — 저장은 성공이므로 안내만
+      integrations.notion = { ok: false, error: "연동 설정을 읽지 못했습니다: " + e.message };
     }
     meeting.integrations = integrations;
 

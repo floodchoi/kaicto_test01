@@ -2345,7 +2345,7 @@ function ActionItems({ onOpenMeeting, projects, projectFilter, setProjectFilter 
 
 /* ── 새 회의록: 텍스트 입력 + 녹음 + 오디오 전사 (녹음·전사 상태는 App이 보유 → 화면 이동해도 계속) ── */
 function NewMeeting({
-  settings, draft, setDraft, trans, audioFile, setAudioFile,
+  settings, me, draft, setDraft, trans, audioFile, setAudioFile,
   rec, meter, canAppend, onRecStart, onRecPause, onRecResume, onRecStop, recsVersion, onRecsChanged, onUseRec,
   projects,
   onTranscribe, onDismissTrans, onCancelTrans, onDone, onCancel, onOpenSettings,
@@ -2357,6 +2357,13 @@ function NewMeeting({
   const setText = (v) => setDraft((p) => ({ ...p, text: v }));
   const [visibility, setVisibility] = useState("private");
   const [projectId, setProjectId] = useState(""); // ""=프로젝트 없음
+  // 이 회의록을 Notion/Dooray로 보낼지 — 회의록별 선택, 마지막 선택을 기억 (기본 켜짐)
+  const [sendNotion, setSendNotion] = useState(() => localStorage.getItem("send_notion") !== "0");
+  const [sendDooray, setSendDooray] = useState(() => localStorage.getItem("send_dooray") !== "0");
+  const toggleSend = (which, v) => {
+    (which === "notion" ? setSendNotion : setSendDooray)(v);
+    localStorage.setItem(which === "notion" ? "send_notion" : "send_dooray", v ? "1" : "0");
+  };
 
   // 변환 후 녹음 원본 삭제 옵션 (localStorage 유지)
   const [deleteAfter, setDeleteAfter] = useState(() => localStorage.getItem("rec_delete_after") === "1");
@@ -2421,6 +2428,7 @@ function NewMeeting({
           title, text, visibility,
           project_id: projectId ? Number(projectId) : null,
           tz: Intl.DateTimeFormat().resolvedOptions().timeZone, // 작성자 시간대 — 날짜 표시 기준
+          notion: sendNotion, dooray: sendDooray, // 회의록별 연동 전송 여부
           ...preview,
           // 미리보기에서 편집하다 비워진 항목은 저장에서 제외
           summary: preview.summary.map((s) => s.trim()).filter(Boolean),
@@ -2447,6 +2455,7 @@ function NewMeeting({
           title, text, visibility,
           project_id: projectId ? Number(projectId) : null,
           tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          notion: sendNotion, dooray: sendDooray,
           summary: [], agenda: [], action_items: [], tags: [],
         }),
       });
@@ -2679,6 +2688,27 @@ function NewMeeting({
           <option value="private">🔒 나만 보기</option>
           <option value="workspace">👥 전체 공개</option>
         </select>
+        {/* 연동이 설정된 경우에만: 이 회의록을 보낼지 회의록별 선택 */}
+        {(me?.has_notion_token || me?.has_dooray_token) && (
+          <span className="flex basis-full flex-wrap items-center gap-3">
+            {me?.has_notion_token && (
+              <label className="flex cursor-pointer items-center gap-1.5 text-sm text-slate-600"
+                title="저장 시 이 회의록을 Notion에 기록할지 (나중에 상세 화면의 '↗ 연동 전송'으로도 보낼 수 있음)">
+                <input type="checkbox" checked={sendNotion} onChange={(e) => toggleSend("notion", e.target.checked)}
+                  className="size-4 accent-teal-700" />
+                📝 Notion에 저장
+              </label>
+            )}
+            {me?.has_dooray_token && (
+              <label className="flex cursor-pointer items-center gap-1.5 text-sm text-slate-600"
+                title="저장 시 액션 아이템을 Dooray 업무로 등록할지">
+                <input type="checkbox" checked={sendDooray} onChange={(e) => toggleSend("dooray", e.target.checked)}
+                  className="size-4 accent-teal-700" />
+                📋 Dooray 업무 등록
+              </label>
+            )}
+          </span>
+        )}
       </div>
 
       {/* 요약 진행 로그 — 클라우드/로컬 공통, 실시간 갱신 */}
@@ -3910,6 +3940,7 @@ export default function App() {
         {view.name === "new" && (
           <NewMeeting
             settings={settings}
+            me={me}
             draft={draft}
             setDraft={setDraft}
             trans={trans}
