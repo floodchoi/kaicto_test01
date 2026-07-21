@@ -3261,6 +3261,10 @@ export default function App() {
       setRec((p) => ({ ...p, error: msg }));
     };
 
+    // 브라우저에 저장소 영구 보존 요청 — iOS 등이 미방문 사이트의 저장소(보관된 녹음)를
+    // 자동 삭제하는 것을 최대한 방지 (거부돼도 녹음은 진행)
+    navigator.storage?.persist?.().catch(() => {});
+
     // 이전 녹음본 처리: append면 완료 시 병합할 대상으로 보관, new면 활성 파일에서 해제
     let appendPrev = null;
     if (mode === "append" && recMeta && audioFile) {
