@@ -1,6 +1,7 @@
 import { sql } from "./_db.js";
 import { wrap } from "./_wrap.js";
 import { requireAuth, encryptText } from "./_auth.js";
+import { logAct } from "./_log.js";
 
 const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
 
@@ -50,6 +51,7 @@ export default wrap(async function handler(req, res) {
       VALUES (${userId}, ${projectId}, ${title}, ${encryptText(text)}, ${summary ?? []}, ${sql.json(agenda ?? [])}, ${tags ?? []}, ${vis})
       RETURNING *`;
     meeting.raw_text = text; // 응답은 평문으로
+    await logAct(userId, "meeting_create", `#${meeting.id} ${title}`);
 
     const items = [];
     for (const it of action_items ?? []) {

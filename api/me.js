@@ -1,6 +1,7 @@
 import { sql } from "./_db.js";
 import { wrap } from "./_wrap.js";
 import { requireAuth, encryptSecret, decryptSecret } from "./_auth.js";
+import { logAct } from "./_log.js";
 
 // GET  /api/me → 내 계정 정보 + 사용할 Gemini 키(본인 키, 없고 허용됐으면 관리자 키)
 //                관리자 키 사용 시 관리자가 지정한 모델(admin_model/admin_stt_model)도 포함
@@ -33,6 +34,8 @@ export default wrap(async function handler(req, res) {
       const ss = String(b.shared_stt_model ?? "").trim().slice(0, 100) || null;
       await sql`UPDATE users SET shared_model = ${sm}, shared_stt_model = ${ss} WHERE id = ${userId}`;
     }
+    const changed = ["gemini_api_key", "gemini_api_key2", "shared_model"].filter((k) => k in b || (k === "shared_model" && "shared_stt_model" in b));
+    if (changed.length) await logAct(userId, "key_save", changed.join(", ") + " 변경");
     return res.status(200).json({ ok: true });
   }
 
@@ -41,7 +44,7 @@ export default wrap(async function handler(req, res) {
   // 스키마 프로브 겸 마지막 접속 기록 — 새 컬럼/테이블이 빠진 DB면 여기서 오류가 나
   // 화면 배너의 [🔧 마이그레이션 실행] 버튼으로 안내된다. (스키마 변경 시 프로브도 갱신할 것)
   await sql`UPDATE users SET last_seen_at = now() WHERE id = ${userId}`;
-  await sql`SELECT 1 FROM project_members LIMIT 0`;
+  await sql`SELECT 1 FROM activity_log LIMIT 0`;
 
   const [me] = await sql`
     SELECT email, is_admin, can_use_admin_key, gemini_key_enc, gemini_key2_enc, shared_model, shared_stt_model

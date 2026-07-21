@@ -18,5 +18,7 @@ export default wrap(async function handler(req, res) {
 
   const text = readFileSync(new URL("../migrate.sql", import.meta.url), "utf8");
   await sql.unsafe(text);
+  const { logAct } = await import("./_log.js"); // 마이그레이션 후에야 테이블이 생길 수 있어 지연 로드
+  await logAct(userId, "migrate_run");
   res.status(200).json({ ok: true });
 });

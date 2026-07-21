@@ -50,6 +50,16 @@ CREATE TABLE IF NOT EXISTS project_members (
   PRIMARY KEY (project_id, user_id)
 );
 
+-- 3-2) 활동 로그 — 로그인·회의록 생성/수정/삭제·멤버 변경·클라이언트 오류 등 기록
+CREATE TABLE IF NOT EXISTS activity_log (
+  id         SERIAL PRIMARY KEY,
+  user_id    INT REFERENCES users(id) ON DELETE SET NULL,
+  action     TEXT NOT NULL,
+  detail     TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS activity_log_user_time ON activity_log (user_id, created_at DESC);
+
 -- 4) meetings (원본 테이블은 초기 schema.sql로 생성돼 있다고 가정)
 ALTER TABLE meetings
   ADD COLUMN IF NOT EXISTS user_id    INT REFERENCES users(id) ON DELETE CASCADE,

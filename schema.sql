@@ -42,6 +42,16 @@ CREATE TABLE project_members (
   PRIMARY KEY (project_id, user_id)
 );
 
+-- 활동 로그 — 로그인·회의록 생성/수정/삭제·멤버 변경·클라이언트 오류 등 기록
+CREATE TABLE activity_log (
+  id         SERIAL PRIMARY KEY,
+  user_id    INT REFERENCES users(id) ON DELETE SET NULL,
+  action     TEXT NOT NULL,
+  detail     TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX activity_log_user_time ON activity_log (user_id, created_at DESC);
+
 CREATE TABLE meetings (
   id         SERIAL PRIMARY KEY,
   user_id    INT REFERENCES users(id) ON DELETE CASCADE,

@@ -1,6 +1,7 @@
 import { sql } from "./_db.js";
 import { wrap } from "./_wrap.js";
 import { requireAuth } from "./_auth.js";
+import { logAct } from "./_log.js";
 
 // GET    /api/projects → 내 프로젝트 + 공유 프로젝트 + 내가 멤버인 프로젝트 (멤버 목록 포함)
 // POST   /api/projects { name, shared? } → 생성 (shared는 관리자만)
@@ -46,8 +47,10 @@ export default wrap(async function handler(req, res) {
       await sql`
         INSERT INTO project_members (project_id, user_id)
         VALUES (${projectId}, ${addUserId}) ON CONFLICT DO NOTHING`;
+      await logAct(userId, "member_add", `프로젝트 #${projectId} ← 사용자 #${addUserId}`);
     } else if (Number.isInteger(removeUserId) && removeUserId > 0) {
       await sql`DELETE FROM project_members WHERE project_id = ${projectId} AND user_id = ${removeUserId}`;
+      await logAct(userId, "member_remove", `프로젝트 #${projectId} → 사용자 #${removeUserId}`);
     } else {
       return res.status(400).json({ error: "addUserId 또는 removeUserId가 필요합니다." });
     }

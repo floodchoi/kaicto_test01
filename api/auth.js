@@ -1,5 +1,6 @@
 import { sql } from "./_db.js";
 import { wrap } from "./_wrap.js";
+import { logAct } from "./_log.js";
 import {
   hashPassword,
   verifyPassword,
@@ -89,6 +90,7 @@ export default wrap(async function handler(req, res) {
       return res.status(409).json({ error: "이미 가입된 이메일입니다. 로그인해주세요." });
     }
 
+    await logAct(user.id, "signup", approved ? "즉시 사용 가능(초대 코드)" : "승인 대기");
     if (!approved)
       return res.status(200).json({
         pending: true,
@@ -105,6 +107,7 @@ export default wrap(async function handler(req, res) {
       return res.status(401).json({ error: "이메일 또는 비밀번호가 올바르지 않습니다." });
     if (!user.approved)
       return res.status(403).json({ error: "관리자 승인 대기 중입니다. 승인이 완료되면 로그인할 수 있습니다." });
+    await logAct(user.id, "login");
     return res.status(200).json({ token: issueToken(user.id), email });
   }
 

@@ -2,6 +2,7 @@ import { sql } from "../_db.js";
 import { wrap } from "../_wrap.js";
 import { requireAuth, encryptText, decryptText } from "../_auth.js";
 import { resolveProjectId, seeCond, editCond } from "../meetings.js";
+import { logAct } from "../_log.js";
 
 export default wrap(async function handler(req, res) {
   const userId = requireAuth(req, res);
@@ -48,6 +49,7 @@ export default wrap(async function handler(req, res) {
       RETURNING *`;
     if (!meeting) return res.status(404).json({ error: "not found" });
     meeting.raw_text = text; // 응답은 평문으로
+    await logAct(userId, "meeting_update", `#${id} ${title}`);
 
     await sql`DELETE FROM action_items WHERE meeting_id = ${id}`;
     const items = [];
@@ -78,8 +80,9 @@ export default wrap(async function handler(req, res) {
   // 회의록 삭제 — 소유자만. 액션 아이템은 FK CASCADE로 함께 삭제.
   if (req.method === "DELETE") {
     const [row] = await sql`
-      DELETE FROM meetings WHERE id = ${id} AND user_id = ${userId} RETURNING id`;
+      DELETE FROM meetings WHERE id = ${id} AND user_id = ${userId} RETURNING id, title`;
     if (!row) return res.status(404).json({ error: "not found" });
+    await logAct(userId, "meeting_delete", `#${id} ${row.title}`);
     return res.status(200).json({ ok: true });
   }
 

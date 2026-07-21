@@ -1633,6 +1633,17 @@ function AdminUsers({ onBack }) {
     load();
   }, []);
 
+  // 활동 로그 (최근 100건, 이메일 필터)
+  const [logs, setLogs] = useState(null);
+  const [logEmail, setLogEmail] = useState("");
+  useEffect(() => {
+    const t = setTimeout(
+      () => api(`/api/log?email=${encodeURIComponent(logEmail.trim())}`).then(setLogs).catch(() => setLogs([])),
+      logEmail ? 300 : 0,
+    );
+    return () => clearTimeout(t);
+  }, [logEmail]);
+
   // 초대 코드 관리
   const [codes, setCodes] = useState([]);
   const [newCode, setNewCode] = useState("");
@@ -1834,9 +1845,69 @@ function AdminUsers({ onBack }) {
           })}
         </ul>
       </section>
+
+      {/* 활동 로그 — 로그인·회의록 작업·멤버 변경 + 브라우저에서 보고된 전사/요약 오류 */}
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex flex-wrap items-center gap-2">
+          <h3 className="text-sm font-semibold text-slate-800">활동 로그 (최근 100건)</h3>
+          <input value={logEmail} onChange={(e) => setLogEmail(e.target.value)}
+            placeholder="🔍 이메일로 필터"
+            className="ml-auto w-56 rounded-xl border border-slate-200 px-3 py-1.5 text-sm outline-none focus:border-teal-500" />
+        </div>
+        {logs === null ? (
+          <p className="mt-3 text-sm text-slate-400">불러오는 중…</p>
+        ) : logs.length === 0 ? (
+          <p className="mt-3 text-sm text-slate-400">기록이 없습니다.</p>
+        ) : (
+          <div className="mt-3 overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-100 text-left text-xs uppercase tracking-wide text-slate-400">
+                  <th className="px-2 py-2">시각</th>
+                  <th className="px-2 py-2">사용자</th>
+                  <th className="px-2 py-2">행위</th>
+                  <th className="px-2 py-2">상세</th>
+                </tr>
+              </thead>
+              <tbody>
+                {logs.map((l) => (
+                  <tr key={l.id} className="border-b border-slate-50">
+                    <td className="whitespace-nowrap px-2 py-1.5 text-xs text-slate-500">{fmtDateTime(l.created_at)}</td>
+                    <td className="whitespace-nowrap px-2 py-1.5 text-xs text-slate-600">{l.email ?? "(탈퇴)"}</td>
+                    <td className="whitespace-nowrap px-2 py-1.5 text-xs">
+                      <span className={l.action.includes("error") ? "font-medium text-red-600" : "text-slate-600"}>
+                        {ACT_LABEL[l.action] ?? l.action}
+                      </span>
+                    </td>
+                    <td className="max-w-0 truncate px-2 py-1.5 text-xs text-slate-500" style={{ width: "45%" }} title={l.detail ?? ""}>
+                      {l.detail ?? ""}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
     </div>
   );
 }
+
+// 활동 로그 행위 한글 라벨
+const ACT_LABEL = {
+  login: "로그인",
+  signup: "가입",
+  meeting_create: "회의록 생성",
+  meeting_update: "회의록 수정",
+  meeting_delete: "회의록 삭제",
+  member_add: "프로젝트 멤버 추가",
+  member_remove: "프로젝트 멤버 해제",
+  migrate_run: "DB 마이그레이션 실행",
+  key_save: "API 키/모델 저장",
+  transcribe_error: "⚠️ 전사 오류",
+  summarize_error: "⚠️ 요약 오류",
+  client_error: "⚠️ 클라이언트 오류",
+};
 
 /* ── 도움말: 기능 소개 팝업 ─────────────────────────────────── */
 function Help({ onClose }) {
@@ -2218,6 +2289,11 @@ function NewMeeting({
       });
     } catch (e) {
       setError(e.message);
+      // 요약도 브라우저→제공자 직행 — 서버 활동 로그로 실패 보고 (관리자 추적용)
+      api("/api/log", {
+        method: "POST",
+        body: JSON.stringify({ action: "summarize_error", detail: String(e.message).slice(0, 500) }),
+      }).catch(() => {});
     } finally {
       clearInterval(ticker);
       setLoading(false);
@@ -2439,10 +2515,18 @@ function NewMeeting({
       <div className="flex items-center gap-3 rounded-xl border border-dashed border-slate-300 px-4 py-3">
         <label className="flex flex-1 cursor-pointer items-center gap-2 text-sm text-slate-500">
           {/* 일부 브라우저는 audio/* 만으로 .aac를 안 걸러줘서 확장자를 명시 */}
+          {/* onClick에서 value 초기화 — 같은 이름의 파일을 다시 골라도 change가 발생하게 */}
           <input type="file" accept="audio/*,.aac,.m4a,.mp3,.wav,.webm" className="hidden"
+            onClick={(e) => { e.target.value = ""; }}
             onChange={(e) => setAudioFile(e.target.files?.[0] ?? null)} />
           <span>🎙️ {audioFile?.name ?? "오디오 파일 선택 (aac, m4a, mp3, wav, webm · 최대 100MB)"}</span>
         </label>
+        {audioFile && trans.status !== "running" && (
+          <button onClick={() => setAudioFile(null)} title="선택한 오디오 제거"
+            className="shrink-0 text-slate-400 hover:text-red-500">
+            ✕
+          </button>
+        )}
         {audioFile && (
           <button
             onClick={() => onTranscribe(audioFile)}
@@ -3333,9 +3417,20 @@ export default function App() {
     if (trans.status === "running") return;
     const sttKey = settings.sttApiKey || settings.apiKey;
     const sttModel = settings.sttModel || settings.model;
-    const fail = (msg) =>
+    const fail = (msg) => {
       setTrans({ status: "error", stage: "", liveText: "", fileName: audioFile.name, error: msg });
-    if (!sttKey) return fail("먼저 설정에서 Gemini API 키를 입력해주세요.");
+      // 전사는 브라우저→Gemini 직행이라 서버가 실패를 모름 — 관리자 추적용으로 보고
+      api("/api/log", {
+        method: "POST",
+        body: JSON.stringify({ action: "transcribe_error", detail: `${audioFile.name}: ${msg}`.slice(0, 500) }),
+      }).catch(() => {});
+    };
+    if (!sttKey)
+      return fail(
+        me?.can_use_admin_key
+          ? "관리자 API 키를 불러오지 못했습니다. 페이지를 새로고침한 뒤 다시 시도하고, 계속되면 관리자에게 키 등록 여부를 확인해주세요."
+          : "먼저 설정에서 Gemini API 키를 입력해주세요.",
+      );
     if (!/^gemini-[a-z0-9.-]+$/.test(sttModel))
       return fail("전사용 모델 ID 형식이 올바르지 않습니다 (예: gemini-2.5-flash).");
     if (audioFile.size > MAX_AUDIO_BYTES)
@@ -3490,10 +3585,13 @@ export default function App() {
     setView({ name: "list" });
   };
 
-  // 저장 완료 → 초안·전사 상태 초기화 후 상세로 이동
+  // 저장 완료 → 초안·전사·선택된 오디오까지 초기화 후 상세로 이동
+  // (오디오를 남겨두면 다음 회의록 작성 때 이전 파일이 그대로 전사되는 사고가 남)
   const finishSave = (id) => {
     setDraft({ title: "", text: "" });
     setTrans(IDLE_TRANS);
+    setAudioFileState(null);
+    setRecMeta(null);
     setView({ name: "detail", id });
   };
 
