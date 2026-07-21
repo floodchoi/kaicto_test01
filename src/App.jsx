@@ -2986,11 +2986,32 @@ function EditMeeting({ m, projects, onSaved, onCancel }) {
 }
 
 /* ── 회의록 상세: 요약 / 아젠다 / 액션 아이템 ─────────────── */
-function Detail({ id, onBack, projects }) {
+function Detail({ id, onBack, projects, me }) {
   const [m, setM] = useState(null);
   const [showRaw, setShowRaw] = useState(false);
   const [editing, setEditing] = useState(false);
   const [deleting, setDeleting] = useState(false);
+
+  // Notion/Dooray 재전송 — 저장 시 실패했거나 연동 설정 전에 만든 회의록을 나중에 전송
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState(null);
+  const resync = async () => {
+    if (!confirm("이 회의록을 Notion/Dooray로 지금 전송할까요?\n(이미 전송된 적이 있다면 새 페이지/업무가 중복 생성될 수 있습니다)")) return;
+    setSyncing(true);
+    setSyncMsg(null);
+    try {
+      const r = await api("/api/integrations", { method: "POST", body: JSON.stringify({ action: "sync", meetingId: id }) });
+      const notes = [];
+      if (r.notion) notes.push(r.notion.ok ? "📝 Notion에 저장됨" : "⚠️ Notion 실패: " + r.notion.error);
+      if (r.dooray) notes.push(r.dooray.ok ? `📋 Dooray 업무 ${r.dooray.created}건 등록됨` : "⚠️ Dooray 실패: " + r.dooray.error);
+      setSyncMsg({ text: notes.join(" · ") || "전송할 연동이 없습니다.", url: r.notion?.ok ? r.notion.url : null });
+    } catch (e) {
+      setSyncMsg({ text: "⚠️ " + e.message, url: null });
+    } finally {
+      setSyncing(false);
+    }
+  };
+  const hasIntegrations = me?.has_notion_token || me?.has_dooray_token;
 
   useEffect(() => {
     api(`/api/meetings/${id}`).then(setM).catch(console.error);
@@ -3028,6 +3049,16 @@ function Detail({ id, onBack, projects }) {
         </button>
         {m.can_edit && (
           <div className="flex gap-2">
+            {hasIntegrations && (
+              <button
+                onClick={resync}
+                disabled={syncing}
+                title="Notion/Dooray로 다시 전송 — 저장 시 실패했거나 연동 설정 전에 만든 회의록도 보낼 수 있습니다"
+                className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+              >
+                {syncing ? "전송 중…" : "↗ 연동 전송"}
+              </button>
+            )}
             <button
               onClick={() => setEditing(true)}
               className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
@@ -3054,6 +3085,18 @@ function Detail({ id, onBack, projects }) {
           </div>
         )}
       </div>
+
+      {syncMsg && (
+        <div className="flex items-center gap-2 rounded-xl bg-teal-50 px-4 py-2.5 text-sm text-teal-800">
+          <span className="min-w-0 flex-1">{syncMsg.text}</span>
+          {syncMsg.url && (
+            <a href={syncMsg.url} target="_blank" rel="noreferrer" className="shrink-0 font-medium underline">
+              Notion에서 열기
+            </a>
+          )}
+          <button onClick={() => setSyncMsg(null)} title="닫기" className="text-teal-500 hover:text-teal-700">✕</button>
+        </div>
+      )}
 
       <div>
         <h2 className="text-2xl font-bold text-slate-800">{m.title}</h2>
@@ -3892,7 +3935,7 @@ export default function App() {
           />
         )}
         {view.name === "detail" && (
-          <Detail id={view.id} projects={projects} onBack={() => setView({ name: "list" })} />
+          <Detail id={view.id} projects={projects} me={me} onBack={() => setView({ name: "list" })} />
         )}
         {view.name === "admin" && <AdminUsers onBack={() => setView({ name: "list" })} />}
       </main>
