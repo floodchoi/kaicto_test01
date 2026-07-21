@@ -41,15 +41,15 @@ export default wrap(async function handler(req, res) {
 
   if (req.method !== "GET") return res.status(405).json({ error: "GET/PUT only" });
 
-  // 스키마 프로브 겸 마지막 접속 기록 — 새 컬럼/테이블이 빠진 DB면 여기서 오류가 나
-  // 화면 배너의 [🔧 마이그레이션 실행] 버튼으로 안내된다. (스키마 변경 시 프로브도 갱신할 것)
-  await sql`UPDATE users SET last_seen_at = now() WHERE id = ${userId}`;
-  await sql`SELECT 1 FROM activity_log LIMIT 0`;
-  await sql`SELECT tz FROM meetings LIMIT 0`;
-
+  // 한 번의 쿼리로: 마지막 접속 기록 + 계정 정보 조회 + 스키마 프로브(서브쿼리가 새
+  // 테이블/컬럼을 건드려, 마이그레이션 누락 시 오류 → 화면 배너의 [🔧] 버튼으로 안내).
+  // 초기 로드마다 호출되는 API라 왕복 횟수를 최소화한다. (스키마 변경 시 프로브도 갱신할 것)
   const [me] = await sql`
-    SELECT email, is_admin, can_use_admin_key, gemini_key_enc, gemini_key2_enc, shared_model, shared_stt_model
-    FROM users WHERE id = ${userId}`;
+    UPDATE users SET last_seen_at = now() WHERE id = ${userId}
+    RETURNING email, is_admin, can_use_admin_key, gemini_key_enc, gemini_key2_enc,
+              shared_model, shared_stt_model,
+              (SELECT 1 FROM activity_log WHERE false) AS _probe_log,
+              (SELECT tz FROM meetings WHERE false) AS _probe_tz`;
   if (!me) return res.status(401).json({ error: "로그인이 필요합니다." });
 
   const ownKey = me.gemini_key_enc ? decryptSecret(me.gemini_key_enc) : null;

@@ -1999,7 +1999,16 @@ function Help({ onClose }) {
 
 /* ── 대시보드: 회의록 리스트 + 검색(키워드·날짜 범위) ─────── */
 function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, onCancelTrans, projects, projectFilter, setProjectFilter, onManageProjects, draftPreview }) {
-  const [meetings, setMeetings] = useState(null);
+  // 첫 페인트 가속: 직전 목록을 캐시에서 즉시 보여주고 서버 응답으로 교체
+  // (서버리스 콜드 스타트·DB 웨이크업 동안 빈 화면 대신 이전 목록이 보임)
+  const [meetings, setMeetings] = useState(() => {
+    if (projectFilter) return null; // 필터가 걸려 있으면 캐시가 안 맞을 수 있어 미사용
+    try {
+      return JSON.parse(localStorage.getItem("meetings_cache")) ?? null;
+    } catch {
+      return null;
+    }
+  });
   const [q, setQ] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
@@ -2014,7 +2023,14 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, onCancelTr
     const t = setTimeout(
       () =>
         api(`/api/meetings?q=${encodeURIComponent(q)}&from=${from}&to=${to}&project=${projectFilter}`)
-          .then(setMeetings)
+          .then((rows) => {
+            setMeetings(rows);
+            // 기본(무필터) 목록만 캐시 — 다음 방문의 첫 페인트용
+            if (!q && !from && !to && !projectFilter)
+              try {
+                localStorage.setItem("meetings_cache", JSON.stringify(rows.slice(0, 30)));
+              } catch { /* 저장 실패 무시 */ }
+          })
           .catch(console.error),
       q ? 300 : 0,
     );
@@ -3604,6 +3620,7 @@ export default function App() {
   const logout = () => {
     localStorage.removeItem("auth_token");
     localStorage.removeItem("auth_email");
+    localStorage.removeItem("meetings_cache"); // 공용 PC에서 목록이 남지 않게
     setAuthed(false);
     setMe(null);
     setSettings((p) => ({ ...p, apiKey: "" })); // 계정 키는 세션과 함께 정리
