@@ -1,7 +1,9 @@
 import { sql } from "./_db.js";
 import { wrap } from "./_wrap.js";
-import { requireAuth, encryptText } from "./_auth.js";
+import { requireAuth, encryptText, decryptSecret } from "./_auth.js";
 import { logAct } from "./_log.js";
+import { pushToNotion } from "./_notion.js";
+import { pushTasksToDooray } from "./_dooray.js";
 
 const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
 
@@ -53,6 +55,41 @@ export default wrap(async function handler(req, res) {
       RETURNING *`;
     meeting.raw_text = text; // 응답은 평문으로
     await logAct(userId, "meeting_create", `#${meeting.id} ${title}`);
+
+    // 연동: 설정된 경우 Notion 페이지 생성 + Dooray 업무 등록.
+    // 실패해도 회의록 저장은 이미 완료 — 결과만 응답에 담아 화면에 알린다.
+    const integrations = {};
+    const [cfg] = await sql`
+      SELECT notion_token_enc, notion_target_id, notion_target_type, dooray_token_enc, dooray_project_id
+      FROM users WHERE id = ${userId}`;
+    const meetingData = { title, text, summary: summary ?? [], agenda: agenda ?? [], action_items: action_items ?? [], tags: tags ?? [] };
+    if (cfg?.notion_token_enc && cfg?.notion_target_id) {
+      try {
+        const url = await pushToNotion(
+          { token: decryptSecret(cfg.notion_token_enc), targetId: cfg.notion_target_id, targetType: cfg.notion_target_type ?? "database" },
+          meetingData,
+        );
+        integrations.notion = { ok: true, url };
+        await logAct(userId, "notion_sync", `#${meeting.id} ${title}${url ? ` → ${url}` : ""}`);
+      } catch (e) {
+        integrations.notion = { ok: false, error: e.message };
+        await logAct(userId, "notion_error", `#${meeting.id} ${e.message}`);
+      }
+    }
+    if (cfg?.dooray_token_enc && cfg?.dooray_project_id && meetingData.action_items.length) {
+      try {
+        const r = await pushTasksToDooray(
+          { token: decryptSecret(cfg.dooray_token_enc), projectId: cfg.dooray_project_id },
+          meetingData,
+        );
+        integrations.dooray = { ok: true, ...r };
+        await logAct(userId, "dooray_sync", `#${meeting.id} 업무 ${r.created}건 등록${r.failed ? `, ${r.failed}건 실패` : ""}`);
+      } catch (e) {
+        integrations.dooray = { ok: false, error: e.message };
+        await logAct(userId, "dooray_error", `#${meeting.id} ${e.message}`);
+      }
+    }
+    meeting.integrations = integrations;
 
     const items = [];
     for (const it of action_items ?? []) {

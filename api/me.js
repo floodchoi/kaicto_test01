@@ -27,6 +27,26 @@ export default wrap(async function handler(req, res) {
         UPDATE users SET gemini_key2_enc = ${key ? encryptSecret(key) : null}
         WHERE id = ${userId}`;
     }
+    // 연동 설정 (Notion · Dooray) — 토큰은 암호화 저장, 빈 문자열 = 삭제
+    if ("notion_token" in b) {
+      const v = String(b.notion_token ?? "").trim();
+      if (v.length > 300) return res.status(400).json({ error: "토큰이 너무 깁니다." });
+      await sql`UPDATE users SET notion_token_enc = ${v ? encryptSecret(v) : null} WHERE id = ${userId}`;
+    }
+    if ("notion_target_id" in b || "notion_target_type" in b) {
+      const tid = String(b.notion_target_id ?? "").trim().slice(0, 300) || null;
+      const ttype = b.notion_target_type === "page" ? "page" : "database";
+      await sql`UPDATE users SET notion_target_id = ${tid}, notion_target_type = ${ttype} WHERE id = ${userId}`;
+    }
+    if ("dooray_token" in b) {
+      const v = String(b.dooray_token ?? "").trim();
+      if (v.length > 300) return res.status(400).json({ error: "토큰이 너무 깁니다." });
+      await sql`UPDATE users SET dooray_token_enc = ${v ? encryptSecret(v) : null} WHERE id = ${userId}`;
+    }
+    if ("dooray_project_id" in b) {
+      const v = String(b.dooray_project_id ?? "").trim().slice(0, 100) || null;
+      await sql`UPDATE users SET dooray_project_id = ${v} WHERE id = ${userId}`;
+    }
     if ("shared_model" in b || "shared_stt_model" in b) {
       const [u] = await sql`SELECT is_admin FROM users WHERE id = ${userId}`;
       if (!u?.is_admin) return res.status(403).json({ error: "공유 모델은 관리자만 지정할 수 있습니다." });
@@ -34,7 +54,7 @@ export default wrap(async function handler(req, res) {
       const ss = String(b.shared_stt_model ?? "").trim().slice(0, 100) || null;
       await sql`UPDATE users SET shared_model = ${sm}, shared_stt_model = ${ss} WHERE id = ${userId}`;
     }
-    const changed = ["gemini_api_key", "gemini_api_key2", "shared_model"].filter((k) => k in b || (k === "shared_model" && "shared_stt_model" in b));
+    const changed = ["gemini_api_key", "gemini_api_key2", "shared_model", "notion_token", "notion_target_id", "dooray_token", "dooray_project_id"].filter((k) => k in b || (k === "shared_model" && "shared_stt_model" in b));
     if (changed.length) await logAct(userId, "key_save", changed.join(", ") + " 변경");
     return res.status(200).json({ ok: true });
   }
@@ -48,6 +68,8 @@ export default wrap(async function handler(req, res) {
     UPDATE users SET last_seen_at = now() WHERE id = ${userId}
     RETURNING email, is_admin, can_use_admin_key, gemini_key_enc, gemini_key2_enc,
               shared_model, shared_stt_model,
+              notion_token_enc, notion_target_id, notion_target_type,
+              dooray_token_enc, dooray_project_id,
               (SELECT 1 FROM activity_log WHERE false) AS _probe_log,
               (SELECT tz FROM meetings WHERE false) AS _probe_tz`;
   if (!me) return res.status(401).json({ error: "로그인이 필요합니다." });
@@ -77,6 +99,12 @@ export default wrap(async function handler(req, res) {
     gemini_key: ownKey ?? adminKey ?? "",
     // 유료(예비) 키 — 본인 키가 429(무료 한도 소진)를 반환하면 브라우저가 자동 전환
     gemini_key2: (me.gemini_key2_enc ? decryptSecret(me.gemini_key2_enc) : null) ?? "",
+    // 연동 설정 (토큰 값 자체는 절대 반환하지 않음 — 존재 여부만)
+    has_notion_token: !!me.notion_token_enc,
+    notion_target_id: me.notion_target_id ?? "",
+    notion_target_type: me.notion_target_type ?? "database",
+    has_dooray_token: !!me.dooray_token_enc,
+    dooray_project_id: me.dooray_project_id ?? "",
     // 관리자 본인: Settings 프리필용 / 관리자 키 사용자: 강제할 모델
     ...(me.is_admin && { shared_model: me.shared_model, shared_stt_model: me.shared_stt_model }),
     ...(!ownKey && adminKey ? adminModels : {}),

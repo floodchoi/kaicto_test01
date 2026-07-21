@@ -1100,6 +1100,22 @@ function Settings({ settings, me, onSave, onClose }) {
   // 관리자 전용: 관리자 키 사용자에게 강제할 공유 모델
   const [sharedModel, setSharedModel] = useState(me?.shared_model ?? "");
   const [sharedStt, setSharedStt] = useState(me?.shared_stt_model ?? "");
+  // 연동 (Notion · Dooray) — 토큰은 입력 시에만 교체 (비우면 기존 유지)
+  const [notionToken, setNotionToken] = useState("");
+  const [notionTarget, setNotionTarget] = useState(me?.notion_target_id ?? "");
+  const [notionType, setNotionType] = useState(me?.notion_target_type ?? "database");
+  const [doorayToken, setDoorayToken] = useState("");
+  const [doorayProject, setDoorayProject] = useState(me?.dooray_project_id ?? "");
+  const [testMsg, setTestMsg] = useState("");
+  const runTest = async (action) => {
+    setTestMsg("연결 테스트 중…");
+    try {
+      const r = await api("/api/integrations", { method: "POST", body: JSON.stringify({ action }) });
+      setTestMsg(`✅ 연결됨: ${r.title}`);
+    } catch (e) {
+      setTestMsg("⚠️ " + e.message);
+    }
+  };
 
   // 실시간 모델 목록 (키가 있으면 자동 조회, 실패 시 기본 목록 폴백)
   const [liveModels, setLiveModels] = useState(null); // null=미조회, []가 아닌 배열=성공
@@ -1172,13 +1188,21 @@ function Settings({ settings, me, onSave, onClose }) {
     localStorage.setItem("gemini_stt_model", next.sttModel);
     onSave(next);
 
-    // 서버 저장분(계정별 키 · 예비 키 · 관리자 공유 모델) — 바뀐 경우에만 호출
+    // 서버 저장분(계정별 키 · 예비 키 · 관리자 공유 모델 · 연동 설정) — 바뀐 경우에만 호출
     const keyChanged = next.apiKey !== (settings.apiKey ?? "").trim();
     const key2Changed = next.apiKey2 !== (settings.apiKey2 ?? "").trim();
     const sharedChanged =
       me?.is_admin &&
       (sharedModel.trim() !== (me.shared_model ?? "") || sharedStt.trim() !== (me.shared_stt_model ?? ""));
-    if (keyChanged || key2Changed || sharedChanged) {
+    const integ = {};
+    if (notionToken.trim()) integ.notion_token = notionToken.trim();
+    if (notionTarget.trim() !== (me?.notion_target_id ?? "") || notionType !== (me?.notion_target_type ?? "database")) {
+      integ.notion_target_id = notionTarget.trim();
+      integ.notion_target_type = notionType;
+    }
+    if (doorayToken.trim()) integ.dooray_token = doorayToken.trim();
+    if (doorayProject.trim() !== (me?.dooray_project_id ?? "")) integ.dooray_project_id = doorayProject.trim();
+    if (keyChanged || key2Changed || sharedChanged || Object.keys(integ).length) {
       setSaving(true);
       setSaveError(null);
       try {
@@ -1188,6 +1212,7 @@ function Settings({ settings, me, onSave, onClose }) {
             ...(keyChanged && { gemini_api_key: next.apiKey }),
             ...(key2Changed && { gemini_api_key2: next.apiKey2 }),
             ...(sharedChanged && { shared_model: sharedModel.trim(), shared_stt_model: sharedStt.trim() }),
+            ...integ,
           }),
         });
       } catch (e) {
@@ -1362,6 +1387,52 @@ function Settings({ settings, me, onSave, onClose }) {
             <p className="mt-1 text-xs text-slate-400">변경 사항은 해당 회원이 새로고침/재로그인하면 적용됩니다.</p>
           </div>
         )}
+
+        {/* 연동 — 회의록 저장 시 자동 전송 */}
+        <div className="mt-6 border-t border-slate-100 pt-5">
+          <h3 className="text-sm font-semibold text-slate-700">연동 (선택) — 저장 시 자동 전송</h3>
+
+          <h4 className="mt-3 text-xs font-semibold uppercase tracking-wide text-slate-400">Notion</h4>
+          <p className="mt-1 text-xs text-slate-500">
+            회의록을 저장하면 제목·요약·아젠다·액션 아이템·태그·원문이 지정한 Notion에 자동 기록됩니다.
+            <a href="https://www.notion.so/my-integrations" target="_blank" rel="noreferrer"
+              className="ml-1 text-teal-700 hover:underline">통합(토큰) 만들기 →</a>
+          </p>
+          <input type="password" value={notionToken} onChange={(e) => setNotionToken(e.target.value)}
+            placeholder={me?.has_notion_token ? "저장됨 — 변경할 때만 입력" : "Notion 통합 토큰 (ntn_… / secret_…)"}
+            className={INPUT_CLS} />
+          <input value={notionTarget} onChange={(e) => setNotionTarget(e.target.value)}
+            placeholder="대상 페이지/데이터베이스 URL 또는 ID" className={INPUT_CLS} />
+          <div className="mt-2 flex flex-wrap items-center gap-3">
+            {[["database", "데이터베이스에 행 추가"], ["page", "페이지 아래 하위 페이지"]].map(([v, label]) => (
+              <label key={v} className="flex cursor-pointer items-center gap-1.5 text-xs text-slate-600">
+                <input type="radio" checked={notionType === v} onChange={() => setNotionType(v)}
+                  className="accent-teal-700" />
+                {label}
+              </label>
+            ))}
+            <button type="button" onClick={() => runTest("notion_test")}
+              className="ml-auto text-xs font-medium text-teal-700 hover:underline">🔌 연결 테스트</button>
+          </div>
+          <p className="mt-1 text-xs text-slate-400">
+            ⚠️ Notion에서 대상 페이지/DB를 열고 ··· → 연결 → 만든 통합을 추가해야 접근됩니다. 테스트는 저장 후 가능합니다.
+          </p>
+
+          <h4 className="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-400">Dooray</h4>
+          <p className="mt-1 text-xs text-slate-500">
+            저장 시 액션 아이템이 지정한 Dooray 프로젝트의 업무로 등록됩니다 (아이템당 1건, 최대 20건).
+          </p>
+          <input type="password" value={doorayToken} onChange={(e) => setDoorayToken(e.target.value)}
+            placeholder={me?.has_dooray_token ? "저장됨 — 변경할 때만 입력" : "Dooray API 토큰"}
+            className={INPUT_CLS} />
+          <div className="mt-2 flex items-center gap-2">
+            <input value={doorayProject} onChange={(e) => setDoorayProject(e.target.value)}
+              placeholder="Dooray 프로젝트 ID" className={INPUT_CLS + " mt-0 flex-1"} />
+            <button type="button" onClick={() => runTest("dooray_test")}
+              className="shrink-0 text-xs font-medium text-teal-700 hover:underline">🔌 연결 테스트</button>
+          </div>
+          {testMsg && <p className="mt-2 rounded-lg bg-slate-50 px-3 py-1.5 text-xs text-slate-600">{testMsg}</p>}
+        </div>
 
         {saveError && <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">⚠️ {saveError}</p>}
 
@@ -1919,6 +1990,10 @@ const ACT_LABEL = {
   transcribe_error: "⚠️ 전사 오류",
   summarize_error: "⚠️ 요약 오류",
   client_error: "⚠️ 클라이언트 오류",
+  notion_sync: "Notion 저장",
+  notion_error: "⚠️ Notion 실패",
+  dooray_sync: "Dooray 등록",
+  dooray_error: "⚠️ Dooray 실패",
 };
 
 /* ── 도움말: 기능 소개 팝업 ─────────────────────────────────── */
@@ -1982,7 +2057,9 @@ function Help({ onClose }) {
             자동으로 유료 키로 전환됩니다.<br />
             · <b>로컬 LLM(요약)</b>: Ollama·LM Studio 등을 이 PC에서 실행 → ⚙️ 설정 → 요약 제공자
             "로컬 LLM" → 서버 주소(예: LM Studio <code>http://localhost:1234/v1</code>) 입력 →
-            "🔄 로컬 모델 불러오기"로 모델 선택. 단, 오디오 전사는 항상 Gemini를 사용합니다.
+            "🔄 로컬 모델 불러오기"로 모델 선택. 단, 오디오 전사는 항상 Gemini를 사용합니다.<br />
+            · <b>외부 연동</b>: ⚙️ 설정에서 Notion(토큰+대상 페이지/DB)·Dooray(토큰+프로젝트 ID)를
+            등록하면 회의록 저장 시 Notion에 전체 내용이, Dooray에 액션 아이템이 업무로 자동 등록됩니다.
           </p>
         </section>
 
@@ -2352,7 +2429,7 @@ function NewMeeting({
           tags: preview.tags.map((t) => t.trim()).filter(Boolean),
         }),
       });
-      onDone(meeting.id);
+      onDone(meeting.id, meeting.integrations);
     } catch (e) {
       setError(e.message);
       setSaving(false);
@@ -2373,7 +2450,7 @@ function NewMeeting({
           summary: [], agenda: [], action_items: [], tags: [],
         }),
       });
-      onDone(meeting.id);
+      onDone(meeting.id, meeting.integrations);
     } catch (e) {
       setError(e.message);
       setSaving(false);
@@ -3629,11 +3706,19 @@ export default function App() {
 
   // 저장 완료 → 초안·전사·선택된 오디오까지 초기화 후 상세로 이동
   // (오디오를 남겨두면 다음 회의록 작성 때 이전 파일이 그대로 전사되는 사고가 남)
-  const finishSave = (id) => {
+  // integrations: 서버가 수행한 Notion/Dooray 자동 전송 결과 → 배너로 알림
+  const [syncNote, setSyncNote] = useState(null);
+  const finishSave = (id, integrations) => {
     setDraft({ title: "", text: "" });
     setTrans(IDLE_TRANS);
     setAudioFileState(null);
     setRecMeta(null);
+    const n = integrations?.notion;
+    const d = integrations?.dooray;
+    const notes = [];
+    if (n) notes.push(n.ok ? "📝 Notion에 저장됨" : "⚠️ Notion 저장 실패: " + n.error);
+    if (d) notes.push(d.ok ? `📋 Dooray 업무 ${d.created}건 등록됨${d.failed ? ` (${d.failed}건 실패)` : ""}` : "⚠️ Dooray 등록 실패: " + d.error);
+    setSyncNote(notes.length ? { text: notes.join(" · "), url: n?.ok ? n.url : null } : null);
     setView({ name: "detail", id });
   };
 
@@ -3701,6 +3786,17 @@ export default function App() {
         </div>
       </header>
       <main className="mx-auto max-w-3xl px-4 py-8">
+        {syncNote && (
+          <div className="mb-4 flex items-center gap-2 rounded-xl bg-teal-50 px-4 py-2.5 text-sm text-teal-800">
+            <span className="min-w-0 flex-1">{syncNote.text}</span>
+            {syncNote.url && (
+              <a href={syncNote.url} target="_blank" rel="noreferrer" className="shrink-0 font-medium underline">
+                Notion에서 열기
+              </a>
+            )}
+            <button onClick={() => setSyncNote(null)} title="닫기" className="text-teal-500 hover:text-teal-700">✕</button>
+          </div>
+        )}
         {keySwitched && (
           <div className="mb-4 flex items-center gap-2 rounded-xl bg-teal-50 px-4 py-2.5 text-sm text-teal-800">
             <span className="min-w-0 flex-1">

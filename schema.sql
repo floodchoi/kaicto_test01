@@ -13,6 +13,11 @@ CREATE TABLE users (
   shared_model      TEXT,                   -- (관리자 행) 관리자 키 사용자에게 강제할 요약 모델
   shared_stt_model  TEXT,                   -- (관리자 행) 〃 전사 모델 (비우면 shared_model)
   last_seen_at      TIMESTAMPTZ,            -- 마지막 접속(앱 로드) 시각
+  notion_token_enc  TEXT,                   -- Notion 연동 토큰 (암호화)
+  notion_target_id  TEXT,                   -- Notion 저장 대상 페이지/DB (URL 또는 ID)
+  notion_target_type TEXT,                  -- 'database' | 'page'
+  dooray_token_enc  TEXT,                   -- Dooray API 토큰 (암호화)
+  dooray_project_id TEXT,                   -- Dooray 프로젝트 ID
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 -- 초기 관리자는 floodchoi@gmail.com — 가입 시 코드에서 자동 지정.

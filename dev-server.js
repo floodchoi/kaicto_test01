@@ -12,6 +12,7 @@ import meetingById from "./api/meetings/[id].js";
 import migrate from "./api/migrate.js";
 import users from "./api/users.js";
 import log from "./api/log.js";
+import integrations from "./api/integrations.js";
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost");
@@ -37,6 +38,7 @@ const server = http.createServer(async (req, res) => {
     else if (url.pathname === "/api/migrate") await migrate(req, res);
     else if (url.pathname === "/api/users") await users(req, res);
     else if (url.pathname === "/api/log") await log(req, res);
+    else if (url.pathname === "/api/integrations") await integrations(req, res);
     else if (idMatch) ((req.query.id = idMatch[1]), await meetingById(req, res));
     else res.status(404).json({ error: "not found" });
   } catch (e) {
