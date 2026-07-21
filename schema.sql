@@ -64,7 +64,8 @@ CREATE TABLE meetings (
   tags       TEXT[] NOT NULL DEFAULT '{}',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ,                        -- 최종 수정 시각 (수정된 적 없으면 NULL)
-  updated_by INT REFERENCES users(id)            -- 최종 수정 계정
+  updated_by INT REFERENCES users(id),           -- 최종 수정 계정
+  tz         TEXT                                -- 작성자 시간대(IANA) — 날짜를 작성자 위치 기준으로 표시
 );
 
 CREATE TABLE action_items (

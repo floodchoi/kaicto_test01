@@ -1,12 +1,24 @@
 import { useEffect, useRef, useState } from "react";
 
-const fmtDate = (d) =>
-  new Date(d).toLocaleDateString("ko-KR", { year: "numeric", month: "short", day: "numeric" });
+// tz(IANA 시간대, 예: "Asia/Seoul")를 주면 그 시간대 기준으로 표시 — 회의록은 작성자 위치
+// 시간으로 보여준다. tz가 없거나 잘못된 값이면 보는 사람 로컬 시간으로 폴백.
+const fmtDate = (d, tz) => {
+  const opts = { year: "numeric", month: "short", day: "numeric" };
+  try {
+    return new Date(d).toLocaleDateString("ko-KR", tz ? { ...opts, timeZone: tz } : opts);
+  } catch {
+    return new Date(d).toLocaleDateString("ko-KR", opts);
+  }
+};
 
-const fmtDateTime = (d) =>
-  new Date(d).toLocaleString("ko-KR", {
-    year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
-  });
+const fmtDateTime = (d, tz) => {
+  const opts = { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" };
+  try {
+    return new Date(d).toLocaleString("ko-KR", tz ? { ...opts, timeZone: tz } : opts);
+  } catch {
+    return new Date(d).toLocaleString("ko-KR", opts);
+  }
+};
 
 // 기본 모델 목록 (키가 없거나 실시간 조회 실패 시 폴백)
 const MODELS = [
@@ -2091,7 +2103,7 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, onCancelTr
                     <p className="truncate font-medium text-slate-800">{m.title}</p>
                     {m.summary?.[0] && <p className="truncate text-xs text-slate-400">{m.summary[0]}</p>}
                   </td>
-                  <td className="whitespace-nowrap px-4 py-2 text-xs text-slate-500">{fmtDate(m.created_at)}</td>
+                  <td className="whitespace-nowrap px-4 py-2 text-xs text-slate-500">{fmtDate(m.created_at, m.tz)}</td>
                   <td className="max-w-32 truncate whitespace-nowrap px-4 py-2 text-xs text-slate-500">
                     {m.project_name ? `📁 ${m.project_name}` : "—"}
                   </td>
@@ -2123,7 +2135,7 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, onCancelTr
               >
                 <div className="flex items-start justify-between gap-2">
                   <h3 className="font-semibold text-slate-800">{m.title}</h3>
-                  <time className="shrink-0 text-xs text-slate-400">{fmtDate(m.created_at)}</time>
+                  <time className="shrink-0 text-xs text-slate-400">{fmtDate(m.created_at, m.tz)}</time>
                 </div>
                 <p className="mt-2 line-clamp-2 text-sm text-slate-500">{m.summary?.[0]}</p>
                 <div className="mt-3 flex flex-wrap gap-1.5">
@@ -2222,7 +2234,7 @@ function ActionItems({ onOpenMeeting, projects, projectFilter, setProjectFilter 
                 onClick={() => onOpenMeeting(a.meeting_id)}
                 className="ml-7 mt-1 text-xs text-teal-700 hover:underline"
               >
-                📝 {a.meeting_title} · {fmtDate(a.meeting_date)}
+                📝 {a.meeting_title} · {fmtDate(a.meeting_date, a.meeting_tz)}
                 {a.project_name ? ` · 📁 ${a.project_name}` : ""}
               </button>
             </li>
@@ -2310,6 +2322,7 @@ function NewMeeting({
         body: JSON.stringify({
           title, text, visibility,
           project_id: projectId ? Number(projectId) : null,
+          tz: Intl.DateTimeFormat().resolvedOptions().timeZone, // 작성자 시간대 — 날짜 표시 기준
           ...preview,
           // 미리보기에서 편집하다 비워진 항목은 저장에서 제외
           summary: preview.summary.map((s) => s.trim()).filter(Boolean),
@@ -2335,6 +2348,7 @@ function NewMeeting({
         body: JSON.stringify({
           title, text, visibility,
           project_id: projectId ? Number(projectId) : null,
+          tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
           summary: [], agenda: [], action_items: [], tags: [],
         }),
       });
@@ -2946,7 +2960,9 @@ function Detail({ id, onBack, projects }) {
       <div>
         <h2 className="text-2xl font-bold text-slate-800">{m.title}</h2>
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <time className="text-sm text-slate-400">{fmtDate(m.created_at)}</time>
+          <time className="text-sm text-slate-400" title={m.tz ? `작성자 위치 시간 (${m.tz})` : ""}>
+            {fmtDate(m.created_at, m.tz)}
+          </time>
           {m.project_name && (
             <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-600">
               📁 {m.project_name}
@@ -2961,7 +2977,7 @@ function Detail({ id, onBack, projects }) {
         </div>
         {m.updated_at && (
           <p className="mt-1.5 text-xs text-slate-400">
-            최종 수정: {fmtDateTime(m.updated_at)}
+            최종 수정: {fmtDateTime(m.updated_at, m.tz)}
             {m.updated_by_email ? ` · ${m.updated_by_email}` : ""}
           </p>
         )}

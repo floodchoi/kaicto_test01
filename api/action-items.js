@@ -19,7 +19,7 @@ export default wrap(async function handler(req, res) {
 
   const rows = await sql`
     SELECT a.id, a.meeting_id, a.task, a.assignee, a.due_date, a.done,
-           m.title AS meeting_title, m.created_at AS meeting_date, p.name AS project_name
+           m.title AS meeting_title, m.created_at AS meeting_date, m.tz AS meeting_tz, p.name AS project_name
     FROM action_items a
     JOIN meetings m ON m.id = a.meeting_id
     LEFT JOIN projects p ON p.id = m.project_id

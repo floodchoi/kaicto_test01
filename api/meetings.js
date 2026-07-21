@@ -44,11 +44,12 @@ export default wrap(async function handler(req, res) {
     if ((action_items?.length ?? 0) > 100) return res.status(400).json({ error: "액션 아이템이 너무 많습니다." });
     const vis = visibility === "workspace" ? "workspace" : "private";
     const projectId = await resolveProjectId(userId, project_id); // 권한 없는 프로젝트는 무시(NULL)
+    const tz = String(req.body?.tz ?? "").slice(0, 50) || null; // 작성자 시간대(IANA)
 
     // 원문은 암호화 저장 — DB가 유출되거나 콘솔에서 직접 조회해도 내용을 볼 수 없음
     const [meeting] = await sql`
-      INSERT INTO meetings (user_id, project_id, title, raw_text, summary, agenda, tags, visibility)
-      VALUES (${userId}, ${projectId}, ${title}, ${encryptText(text)}, ${summary ?? []}, ${sql.json(agenda ?? [])}, ${tags ?? []}, ${vis})
+      INSERT INTO meetings (user_id, project_id, title, raw_text, summary, agenda, tags, visibility, tz)
+      VALUES (${userId}, ${projectId}, ${title}, ${encryptText(text)}, ${summary ?? []}, ${sql.json(agenda ?? [])}, ${tags ?? []}, ${vis}, ${tz})
       RETURNING *`;
     meeting.raw_text = text; // 응답은 평문으로
     await logAct(userId, "meeting_create", `#${meeting.id} ${title}`);
@@ -73,7 +74,7 @@ export default wrap(async function handler(req, res) {
 
   // 본인 것 + 전체 공개(workspace)만. ponytail: ILIKE 검색으로 충분, 커지면 FTS.
   const rows = await sql`
-    SELECT m.id, m.title, m.summary, m.tags, m.created_at, m.visibility,
+    SELECT m.id, m.title, m.summary, m.tags, m.created_at, m.visibility, m.tz,
            m.project_id, p.name AS project_name,
            (m.user_id = ${userId}) AS is_owner, u.email AS owner_email
     FROM meetings m

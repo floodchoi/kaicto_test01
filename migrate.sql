@@ -66,7 +66,8 @@ ALTER TABLE meetings
   ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'private',
   ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS updated_by INT REFERENCES users(id),
-  ADD COLUMN IF NOT EXISTS project_id INT REFERENCES projects(id) ON DELETE SET NULL;
+  ADD COLUMN IF NOT EXISTS project_id INT REFERENCES projects(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS tz         TEXT; -- 작성자 시간대(IANA) — 날짜를 작성자 위치 기준으로 표시
 
 -- ============================================================
 -- [최초 1회만] 아래는 상황에 따라 선택 실행
