@@ -88,7 +88,10 @@ async function api(path, opts) {
 }
 
 // 큰 오디오는 브라우저 → Gemini Files API 직접 업로드(우리 서버리스 함수의 4.5MB 한도 우회).
-const MAX_AUDIO_BYTES = 100 * 1024 * 1024; // Gemini 파일 상한은 훨씬 크지만 회의 녹음엔 충분
+// 긴 파일은 10분 조각(각 ~19MB WAV)으로 분할 전사하므로 원본이 커도 처리 가능 —
+// 상한은 브라우저 디코딩 메모리를 고려한 값 (Gemini 자체 상한은 2GB)
+const MAX_AUDIO_BYTES = 500 * 1024 * 1024;
+const BIG_AUDIO_BYTES = 100 * 1024 * 1024; // 이보다 크면 분할 준비가 오래 걸린다고 안내
 
 const AUDIO_MIME = {
   aac: "audio/aac", m4a: "audio/aac", mp3: "audio/mp3",
@@ -2640,7 +2643,7 @@ function NewMeeting({
           <input type="file" accept="audio/*,.aac,.m4a,.mp3,.wav,.webm" className="hidden"
             onClick={(e) => { e.target.value = ""; }}
             onChange={(e) => setAudioFile(e.target.files?.[0] ?? null)} />
-          <span>🎙️ {audioFile?.name ?? "오디오 파일 선택 (aac, m4a, mp3, wav, webm · 최대 100MB)"}</span>
+          <span>🎙️ {audioFile?.name ?? "오디오 파일 선택 (aac, m4a, mp3, wav, webm · 최대 500MB — 긴 파일은 자동 분할 전사)"}</span>
         </label>
         {audioFile && trans.status !== "running" && (
           <button onClick={() => setAudioFile(null)} title="선택한 오디오 제거"
@@ -3625,7 +3628,7 @@ export default function App() {
     if (!/^gemini-[a-z0-9.-]+$/.test(sttModel))
       return fail("전사용 모델 ID 형식이 올바르지 않습니다 (예: gemini-2.5-flash).");
     if (audioFile.size > MAX_AUDIO_BYTES)
-      return fail("오디오가 너무 큽니다 (최대 100MB). 더 짧은 파일을 사용하거나 잘라서 올려주세요.");
+      return fail("오디오가 너무 큽니다 (최대 500MB). 파일을 나눠서 올려주세요 — 잘린 각 파일은 이어서 전사해 붙일 수 있습니다.");
 
     const setStage = (stage) => setTrans((p) => ({ ...p, stage }));
     const addDelta = (delta) => setTrans((p) => ({ ...p, liveText: p.liveText + delta }));
@@ -3680,7 +3683,11 @@ export default function App() {
       // 긴 파일은 10분 조각으로 분할 → 조각마다 전사 결과가 도착 (준실시간 체감)
       let chunks = null;
       try {
-        setStage("오디오 분석 중…");
+        setStage(
+          audioFile.size > BIG_AUDIO_BYTES
+            ? `대용량 오디오(${(audioFile.size / 1048576).toFixed(0)}MB) 분석·분할 준비 중… (수 분 걸릴 수 있습니다)`
+            : "오디오 분석 중…",
+        );
         // 디코딩·리샘플링이 5분 넘게 걸리면(저사양·거대 파일) 멈춘 것으로 보고 통짜 전사로 폴백
         chunks = await Promise.race([
           splitAudioToWavChunks(audioFile),
