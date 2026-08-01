@@ -63,9 +63,15 @@ const loadSettings = () => ({
   summaryProvider: localStorage.getItem("summary_provider") ?? "gemini",
   localBaseUrl: localStorage.getItem("local_base_url") ?? "http://localhost:11434/v1",
   localModel: localStorage.getItem("local_model") ?? "",
-  // 음성 전사 전용 (선택). 비우면 위 Gemini 키/모델을 그대로 사용. (전사는 항상 Gemini)
+  // 음성 전사: 제공자 선택 (gemini | openai)
+  sttProvider: localStorage.getItem("stt_provider") ?? "gemini",
+  // Gemini 전사 전용 키/모델 (선택). 비우면 위 Gemini 키/모델을 그대로 사용.
   sttApiKey: localStorage.getItem("gemini_stt_api_key") ?? "",
   sttModel: localStorage.getItem("gemini_stt_model") ?? "",
+  // OpenAI(GPT) — 전사·요약에 사용 (키는 이 브라우저에만 저장)
+  openaiKey: localStorage.getItem("openai_api_key") ?? "",
+  openaiSttModel: localStorage.getItem("openai_stt_model") ?? "gpt-4o-transcribe",
+  openaiSumModel: localStorage.getItem("openai_sum_model") ?? "gpt-5.6-luna",
 });
 
 async function api(path, opts) {
@@ -209,20 +215,63 @@ async function uploadAudioToGemini(file, apiKey, onStage, signal) {
   return { fileUri: meta.uri, mimeType };
 }
 
-const TRANSCRIBE_PROMPT = `이 오디오는 회의 녹음이다. 요약·생략 없이 들리는 그대로 정확히 전사해라.
-- 한국어로 말한 부분은 한국어 그대로 전사한다.
-- 영어로 말한 부분은 영어 원문을 그대로 전사한 뒤, 바로 다음 줄에 자연스러운 한국어 번역을 함께 제공한다. 형식:
-EN: <영어 원문>
-KO: <한국어 번역>
-화자가 구분되면 '화자1:', '화자2:'처럼 표기해라.
-- 무음·잡음·배경음 구간은 건너뛴다. 같은 글자·단어·문장을 기계적으로 반복해 출력하지 않는다.
-  실제로 같은 말이 여러 번 반복된 경우에도 한 번만 적고 "(반복)"이라고 표기해라.`;
+// 전사 시스템 지시 — 영문 지시가 더 엄격히 준수됨(출력은 한국어). 화자 분리(겹침 포함)를
+// 유도하고, JSON 배열 출력을 강제한다. systemInstruction 필드로 주입.
+const TRANSCRIBE_SYSTEM = `You are an expert audio transcription and diarization assistant.
+Your task is to transcribe the provided Korean audio accurately and identify different speakers, especially in sections where people speak at the same time or overlap.
+
+[Strict Rules]
+1. Listen carefully to the tone, pitch, and context to distinguish between different speakers (e.g., "화자 1", "화자 2").
+2. If multiple people are speaking at the same time (overlapping), break down their sentences and assign them to the correct speaker, labeling them like "화자 1 (겹침)". Do not skip overlapping parts.
+3. Transcribe exactly what is heard, without summarizing or omitting content.
+4. If a segment is spoken in English, transcribe the English as heard, then append " / " followed by a natural Korean translation in the same "text" value.
+5. Skip silence, background noise, and music. Never mechanically repeat the same character, word, or sentence; if something is genuinely repeated many times in the audio, write it once followed by "(반복)".
+6. Output the final transcription strictly as a JSON array in the format below. Do not add any conversational text before or after the JSON.
+
+[Output Format]
+[
+  { "speaker": "화자 1", "text": "안녕하세요, 오늘 회의를 시작하겠습니다." },
+  { "speaker": "화자 2", "text": "네, 알겠습니다. 자료 먼저 공유해 드릴게요." },
+  { "speaker": "화자 1 (겹침)", "text": "아, 잠시만요." },
+  { "speaker": "화자 3 (겹침)", "text": "제가 먼저 발표해도 될까요?" }
+]`;
+
+// Gemini structured output — JSON 배열 [{speaker, text}] 강제
+const TRANSCRIBE_SCHEMA = {
+  type: "ARRAY",
+  items: {
+    type: "OBJECT",
+    properties: { speaker: { type: "STRING" }, text: { type: "STRING" } },
+    required: ["speaker", "text"],
+    propertyOrdering: ["speaker", "text"],
+  },
+};
+
+const TRANSCRIBE_PROMPT = "Transcribe and diarize this audio following the rules.";
 
 // 분할 전사 시 이어지는 조각용. ⚠️ 직전 조각의 전사 텍스트를 인용해 넘기면 안 된다 —
 // 모델이 그 인용문을 출력에 그대로 되풀이(echo)해서, 특정 문구가 조각마다 반복되는
 // 사고의 원인이 됐다. 조각 번호만 알려주고 텍스트는 일절 전달하지 않는다.
 const contPrompt = (idx, total) =>
-  `${TRANSCRIBE_PROMPT}\n\n(참고) 이 오디오는 긴 녹음을 ${total}개로 나눈 것 중 ${idx}번째 조각이다. 이전 조각들은 이미 전사가 끝났다. 오직 이 오디오에서 실제로 들리는 내용만 전사하고, 이전 조각 내용을 추측하거나 반복해서 쓰지 마라. 화자 라벨은 '화자1:', '화자2:' 형식을 그대로 사용해라.`;
+  `This audio is segment ${idx} of ${total} from one longer recording; earlier segments are already transcribed. Transcribe and diarize only this segment following the rules. Keep using speaker labels of the form "화자 N".`;
+
+// 전사 JSON 배열 → "화자 N: 내용" 줄글로 변환 (잘린 응답은 복구, 실패 시 원문 그대로)
+function diarizedToText(raw) {
+  const t = stripFences(String(raw ?? "").trim());
+  let arr = null;
+  try {
+    arr = JSON.parse(t);
+  } catch {
+    try {
+      arr = repairJson(t); // 첫 [ 또는 { 부터 복구 시도
+    } catch { /* 아래 폴백 */ }
+  }
+  if (!Array.isArray(arr)) return String(raw ?? "");
+  return arr
+    .map((e) => `${(e?.speaker ?? "화자").toString().trim()}: ${(e?.text ?? "").toString().trim()}`)
+    .filter((l) => !/^.{0,30}:\s*$/.test(l))
+    .join("\n");
+}
 
 // 조각 이어붙일 때 경계 중복 제거: 새 조각 결과가 누적본 끝과 같은 텍스트로 시작하면 잘라냄
 function trimOverlap(acc, next) {
@@ -276,7 +325,8 @@ function collapseRepeats(text) {
 }
 
 // 짧은 파일이면 null 반환(통짜 경로 사용 — 원본 그대로 보내 품질 손실 없음)
-async function splitAudioToWavChunks(file) {
+// maxWholeSec: 이 길이까지는 통짜 허용 (OpenAI는 파일당 25MB 제한이라 10분 기준으로 낮춤)
+async function splitAudioToWavChunks(file, maxWholeSec = CHUNK_SEC * 1.5) {
   const raw = await file.arrayBuffer();
   const probe = new AudioContext();
   let decoded;
@@ -285,7 +335,7 @@ async function splitAudioToWavChunks(file) {
   } finally {
     probe.close();
   }
-  if (decoded.duration <= CHUNK_SEC * 1.5) return null;
+  if (decoded.duration <= maxWholeSec) return null;
 
   // 모노 16kHz로 리샘플 (OfflineAudioContext)
   const frames = Math.ceil(decoded.duration * SPLIT_RATE);
@@ -483,10 +533,16 @@ async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, p
       method: "POST",
       headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
       body: JSON.stringify({
+        // 화자 분리 규칙은 systemInstruction으로 주입 — 대화 흐름에 휘둘리지 않고 규칙 고수
+        systemInstruction: { parts: [{ text: TRANSCRIBE_SYSTEM }] },
         contents: [{ parts: [{ text: prompt }, { fileData: { mimeType, fileUri } }] }],
-        // temperature 0(그리디)은 무음·잡음 구간에서 같은 토큰을 무한 반복하는
-        // 루프에 빠지기 쉽다 — 약간의 온도로 반복 고리를 끊는다.
-        generationConfig: { temperature: 0.3 },
+        // temperature 0.2: 소리가 겹칠 때의 환각을 줄이면서도(낮게), 무음 구간의
+        // 그리디 무한 반복 루프는 피할 정도(0 초과)로 설정. JSON 배열 출력 강제.
+        generationConfig: {
+          temperature: 0.2,
+          responseMimeType: "application/json",
+          responseSchema: TRANSCRIBE_SCHEMA,
+        },
       }),
       signal: ctrl.signal,
     },
@@ -592,6 +648,29 @@ async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, p
   return full;
 }
 
+// OpenAI(GPT) 전사 — /v1/audio/transcriptions (multipart, 파일당 25MB 제한이라
+// 긴 파일은 호출부에서 10분 WAV 조각(~19MB)으로 분할해 넘긴다). 화자 분리 미지원(텍스트만).
+async function transcribeWithOpenAI(file, apiKey, model, signal) {
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("model", model);
+  fd.append("response_format", "text");
+  const res = await gfetch(
+    "https://api.openai.com/v1/audio/transcriptions",
+    { method: "POST", headers: { Authorization: `Bearer ${apiKey}` }, body: fd, signal },
+    "OpenAI 전사",
+    600_000,
+  );
+  if (!res.ok) {
+    const msg = (await res.json().catch(() => ({}))).error?.message ?? `HTTP ${res.status}`;
+    throw new Error("전사 실패: " + msg);
+  }
+  const ct = res.headers.get("content-type") ?? "";
+  const text = ct.includes("json") ? ((await res.json()).text ?? "") : await res.text();
+  if (!text.trim()) throw new Error("전사 결과가 비어있습니다. 오디오에 사람 음성이 들리는지 확인하세요.");
+  return text;
+}
+
 // 전사 완료 후 제목 자동 추천 (짧은 단발 호출 — 실패해도 전사 결과엔 영향 없음)
 async function suggestTitle(text, apiKey, model) {
   const res = await gfetch(
@@ -688,7 +767,10 @@ const stripFences = (s) =>
 // 괄호를 닫아 파싱한다. 실패하면 끝을 한 글자씩 줄여가며 재시도 (최대 500회).
 // (로컬 서버가 최대 출력 토큰에 걸려 응답이 끊기는 경우 부분 결과라도 살린다)
 function repairJson(raw) {
-  const start = raw.indexOf("{");
+  // 객체({)뿐 아니라 배열([)로 시작하는 응답(전사 화자 분리)도 복구
+  const s1 = raw.indexOf("{");
+  const s2 = raw.indexOf("[");
+  const start = s1 === -1 ? s2 : s2 === -1 ? s1 : Math.min(s1, s2);
   if (start === -1) throw new Error("JSON 없음");
   const t = raw.slice(start);
 
@@ -824,7 +906,9 @@ async function summarizeWithGemini(text, apiKey, model, onLog, koRetry = false) 
   }
 }
 
-async function summarizeWithLocal(text, baseUrl, model, onLog, koRetry = false) {
+// apiKey를 주면 OpenAI(또는 인증이 필요한 호환 서버) 호출로 동작 —
+// Authorization 헤더를 붙이고, 신형 GPT 모델이 거부하는 max_tokens/temperature는 생략
+async function summarizeWithLocal(text, baseUrl, model, onLog, koRetry = false, apiKey = null) {
   // 주소 보정: 끝 슬래시 제거 + /v1 누락 시 자동 추가 (Ollama·LM Studio 모두 /v1 사용)
   let base = baseUrl.replace(/\/+$/, "");
   if (!/\/v1$/.test(base)) base += "/v1";
@@ -836,12 +920,15 @@ async function summarizeWithLocal(text, baseUrl, model, onLog, koRetry = false) 
     // JSON 형식은 시스템 프롬프트(SUMMARY_JSON_HINT)로 강제하고 코드펜스는 파싱 시 제거.
     res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(apiKey && { Authorization: `Bearer ${apiKey}` }),
+      },
       body: JSON.stringify({
         model,
         stream: true, // 진행 상황을 실시간으로 받기 위해 스트리밍
-        temperature: 0.2,
-        max_tokens: 4096, // 일부 로컬 서버는 기본 한도가 작아 JSON이 중간에 잘림
+        // 신형 GPT 계열은 temperature/max_tokens를 거부하는 모델이 있어 OpenAI 호출 시 생략
+        ...(apiKey ? {} : { temperature: 0.2, max_tokens: 4096 }),
         messages: [
           { role: "system", content: SUMMARY_SYSTEM + "\n\n" + SUMMARY_JSON_HINT },
           { role: "user", content: summaryUserPrompt(text, koRetry) },
@@ -924,16 +1011,22 @@ async function summarizeWithLocal(text, baseUrl, model, onLog, koRetry = false) 
 // 제공자 분기 — onLog(줄, replace?)로 진행 상황을 실시간 보고.
 // 결과가 영어로 나오면(입력 언어를 따라간 사고) 한국어 강제 지시로 1회 재요청.
 async function summarizeText(text, settings, onLog) {
-  if (settings.summaryProvider === "local") {
+  const p = settings.summaryProvider;
+  if (p === "local") {
     if (!settings.localBaseUrl?.trim()) throw new Error("로컬 서버 주소를 설정에서 입력해주세요.");
     if (!settings.localModel?.trim()) throw new Error("로컬 모델명을 설정에서 입력해주세요.");
+  } else if (p === "openai") {
+    if (!settings.openaiKey?.trim()) throw new Error("OpenAI API 키를 설정에서 입력해주세요.");
+    if (!settings.openaiSumModel?.trim()) throw new Error("OpenAI 요약 모델명을 설정에서 입력해주세요.");
   } else if (!settings.apiKey) {
     throw new Error("Gemini API 키를 설정에서 입력해주세요.");
   }
   const run = (koRetry) =>
-    settings.summaryProvider === "local"
+    p === "local"
       ? summarizeWithLocal(text, settings.localBaseUrl, settings.localModel, onLog, koRetry)
-      : summarizeWithGemini(text, settings.apiKey, settings.model, onLog, koRetry);
+      : p === "openai"
+        ? summarizeWithLocal(text, "https://api.openai.com/v1", settings.openaiSumModel, onLog, koRetry, settings.openaiKey)
+        : summarizeWithGemini(text, settings.apiKey, settings.model, onLog, koRetry);
 
   let result = await run(false);
   const sample = [
@@ -1098,6 +1191,11 @@ function Settings({ settings, me, onSave, onClose }) {
   const [localModel, setLocalModel] = useState(settings.localModel);
   const [sttApiKey, setSttApiKey] = useState(settings.sttApiKey);
   const [sttModel, setSttModel] = useState(settings.sttModel);
+  const [sttProvider, setSttProvider] = useState(settings.sttProvider ?? "gemini");
+  // OpenAI(GPT) — 전사·요약 공용 키 + 용도별 모델 (이 브라우저에만 저장)
+  const [openaiKey, setOpenaiKey] = useState(settings.openaiKey ?? "");
+  const [openaiSttModel, setOpenaiSttModel] = useState(settings.openaiSttModel ?? "gpt-4o-transcribe");
+  const [openaiSumModel, setOpenaiSumModel] = useState(settings.openaiSumModel ?? "gpt-5.6-luna");
   // 관리자 키 사용자는 관리자가 지정한 모델로 고정
   const locked = !!(me?.using_admin_key && me?.admin_model);
   // 관리자 전용: 관리자 키 사용자에게 강제할 공유 모델
@@ -1181,6 +1279,10 @@ function Settings({ settings, me, onSave, onClose }) {
       localModel: localModel.trim(),
       sttApiKey: sttApiKey.trim(),
       sttModel,
+      sttProvider,
+      openaiKey: openaiKey.trim(),
+      openaiSttModel: openaiSttModel.trim() || "gpt-4o-transcribe",
+      openaiSumModel: openaiSumModel.trim() || "gpt-5.6-luna",
     };
     // 브라우저 설정(모델·로컬 LLM 등)은 서버와 무관 — 먼저 저장해 서버 오류에 인질 잡히지 않게
     localStorage.setItem("gemini_model", next.model);
@@ -1189,6 +1291,10 @@ function Settings({ settings, me, onSave, onClose }) {
     localStorage.setItem("local_model", next.localModel);
     localStorage.setItem("gemini_stt_api_key", next.sttApiKey);
     localStorage.setItem("gemini_stt_model", next.sttModel);
+    localStorage.setItem("stt_provider", next.sttProvider);
+    localStorage.setItem("openai_api_key", next.openaiKey);
+    localStorage.setItem("openai_stt_model", next.openaiSttModel);
+    localStorage.setItem("openai_sum_model", next.openaiSumModel);
     onSave(next);
 
     // 서버 저장분(계정별 키 · 예비 키 · 관리자 공유 모델 · 연동 설정) — 바뀐 경우에만 호출
@@ -1279,11 +1385,21 @@ function Settings({ settings, me, onSave, onClose }) {
           </button>
         </div>
 
+        {/* OpenAI(GPT) API 키 — 전사·요약 공용 */}
+        <div className="mt-6 border-t border-slate-100 pt-5">
+          <h3 className="text-sm font-semibold text-slate-700">OpenAI(GPT) API 키 (선택)</h3>
+          <input type="password" value={openaiKey} onChange={(e) => setOpenaiKey(e.target.value)}
+            placeholder="sk-… (전사·요약 제공자로 GPT를 쓸 때 필요)" className={INPUT_CLS} />
+          <p className="mt-1 text-xs text-slate-400">
+            이 키는 <b>이 브라우저에만</b> 저장되며, 아래에서 전사·요약 제공자를 GPT로 선택하면 사용됩니다.
+          </p>
+        </div>
+
         {/* 요약 제공자 */}
         <div className="mt-6 border-t border-slate-100 pt-5">
           <h3 className="text-sm font-semibold text-slate-700">요약 제공자</h3>
           <div className="mt-2 flex gap-2">
-            {[["gemini", "Gemini (클라우드)"], ["local", "로컬 LLM"]].map(([v, label]) => (
+            {[["gemini", "Gemini"], ["openai", "GPT (OpenAI)"], ["local", "로컬 LLM"]].map(([v, label]) => (
               <button key={v} onClick={() => setSummaryProvider(v)}
                 className={`flex-1 rounded-xl border px-3 py-2 text-sm font-medium ${
                   summaryProvider === v ? "border-teal-500 bg-teal-50 text-teal-700" : "border-slate-200 text-slate-500"
@@ -1293,7 +1409,17 @@ function Settings({ settings, me, onSave, onClose }) {
             ))}
           </div>
 
-          {summaryProvider === "gemini" ? (
+          {summaryProvider === "openai" ? (
+            <>
+              <label className="mt-4 block text-sm font-medium text-slate-700">GPT 요약 모델</label>
+              <input list="openai-sum-models" value={openaiSumModel} onChange={(e) => setOpenaiSumModel(e.target.value.trim())}
+                placeholder="예: gpt-5.6-luna" className={INPUT_CLS} />
+              <datalist id="openai-sum-models">
+                {["gpt-5.6-luna", "gpt-5.6", "gpt-4o-mini", "gpt-4o"].map((id) => <option key={id} value={id} />)}
+              </datalist>
+              <p className="mt-1 text-xs text-slate-400">위의 OpenAI API 키를 사용합니다.</p>
+            </>
+          ) : summaryProvider === "gemini" ? (
             <>
               <label className="mt-4 block text-sm font-medium text-slate-700">Gemini 요약 모델</label>
               {locked ? (
@@ -1338,34 +1464,61 @@ function Settings({ settings, me, onSave, onClose }) {
           )}
         </div>
 
-        {/* 음성 전사 전용 (선택) — 전사는 항상 Gemini */}
+        {/* 음성 전사 — 제공자 선택 (Gemini | GPT) */}
         <div className="mt-6 border-t border-slate-100 pt-5">
-          <h3 className="text-sm font-semibold text-slate-700">음성 전사 전용 (선택)</h3>
-          <p className="mt-1 text-xs text-slate-500">
-            전사는 항상 Gemini입니다. 다른 키/모델을 쓰려면 입력하세요. 비우면 위 Gemini 키/모델을 사용합니다.
-          </p>
+          <h3 className="text-sm font-semibold text-slate-700">음성 전사 (STT)</h3>
+          <div className="mt-2 flex gap-2">
+            {[["gemini", "Gemini"], ["openai", "GPT (OpenAI)"]].map(([v, label]) => (
+              <button key={v} onClick={() => setSttProvider(v)}
+                className={`flex-1 rounded-xl border px-3 py-2 text-sm font-medium ${
+                  sttProvider === v ? "border-teal-500 bg-teal-50 text-teal-700" : "border-slate-200 text-slate-500"
+                }`}>
+                {label}
+              </button>
+            ))}
+          </div>
 
-          <label className="mt-4 block text-sm font-medium text-slate-700">전사용 API 키</label>
-          <input type="password" value={sttApiKey} onChange={(e) => setSttApiKey(e.target.value)}
-            placeholder="비워두면 위 Gemini 키 사용" className={INPUT_CLS} />
-
-          <label className="mt-4 block text-sm font-medium text-slate-700">전사용 모델</label>
-          {locked ? (
+          {sttProvider === "openai" ? (
             <>
-              <input value={me.admin_stt_model || me.admin_model} disabled
-                className={INPUT_CLS + " bg-slate-50 text-slate-500"} />
-              <p className="mt-1 text-xs text-amber-700">🔒 관리자가 지정한 전사 모델로 고정됩니다.</p>
+              <label className="mt-4 block text-sm font-medium text-slate-700">GPT 전사 모델</label>
+              <input list="openai-stt-models" value={openaiSttModel} onChange={(e) => setOpenaiSttModel(e.target.value.trim())}
+                placeholder="예: gpt-4o-transcribe" className={INPUT_CLS} />
+              <datalist id="openai-stt-models">
+                {["gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"].map((id) => <option key={id} value={id} />)}
+              </datalist>
+              <p className="mt-1 text-xs text-slate-400">
+                위의 OpenAI API 키를 사용합니다. ⚠️ GPT 전사는 <b>화자 분리(화자 1/화자 2 구분)를 지원하지 않아</b>
+                텍스트만 나옵니다 — 화자 분리가 필요하면 Gemini를 사용하세요.
+              </p>
             </>
           ) : (
             <>
-              <input list="stt-models" value={sttModel} onChange={(e) => setSttModel(e.target.value.trim())}
-                placeholder="비워두면 위 Gemini 요약 모델과 동일" className={INPUT_CLS} />
-              <datalist id="stt-models">
-                {modelOptions.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-              </datalist>
-              <p className="mt-1 text-xs text-slate-500">
-                목록에서 고르거나 다른 Gemini 모델 ID를 직접 입력할 수 있습니다 (예: gemini-2.5-flash-lite).
+              <p className="mt-2 text-xs text-slate-500">
+                기본은 위 Gemini 키/요약 모델을 그대로 사용합니다. 전사만 다른 키/모델을 쓰려면 아래에 입력하세요.
               </p>
+              <label className="mt-3 block text-sm font-medium text-slate-700">전사용 API 키 (선택)</label>
+              <input type="password" value={sttApiKey} onChange={(e) => setSttApiKey(e.target.value)}
+                placeholder="비워두면 위 Gemini 키 사용" className={INPUT_CLS} />
+
+              <label className="mt-4 block text-sm font-medium text-slate-700">전사용 모델 (선택)</label>
+              {locked ? (
+                <>
+                  <input value={me.admin_stt_model || me.admin_model} disabled
+                    className={INPUT_CLS + " bg-slate-50 text-slate-500"} />
+                  <p className="mt-1 text-xs text-amber-700">🔒 관리자가 지정한 전사 모델로 고정됩니다.</p>
+                </>
+              ) : (
+                <>
+                  <input list="stt-models" value={sttModel} onChange={(e) => setSttModel(e.target.value.trim())}
+                    placeholder="비워두면 위 Gemini 요약 모델과 동일" className={INPUT_CLS} />
+                  <datalist id="stt-models">
+                    {modelOptions.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+                  </datalist>
+                  <p className="mt-1 text-xs text-slate-500">
+                    목록에서 고르거나 다른 Gemini 모델 ID를 직접 입력할 수 있습니다 (예: gemini-2.5-flash-lite).
+                  </p>
+                </>
+              )}
             </>
           )}
         </div>
@@ -2060,7 +2213,9 @@ function Help({ onClose }) {
             자동으로 유료 키로 전환됩니다.<br />
             · <b>로컬 LLM(요약)</b>: Ollama·LM Studio 등을 이 PC에서 실행 → ⚙️ 설정 → 요약 제공자
             "로컬 LLM" → 서버 주소(예: LM Studio <code>http://localhost:1234/v1</code>) 입력 →
-            "🔄 로컬 모델 불러오기"로 모델 선택. 단, 오디오 전사는 항상 Gemini를 사용합니다.<br />
+            "🔄 로컬 모델 불러오기"로 모델 선택 (로컬 LLM은 요약 전용).<br />
+            · <b>GPT(OpenAI)</b>: ⚙️ 설정에 OpenAI 키를 넣으면 전사·요약 제공자로 GPT를 선택할 수
+            있습니다. 단, GPT 전사는 화자 분리를 지원하지 않습니다 (화자 구분은 Gemini 전사 사용).<br />
             · <b>외부 연동</b>: ⚙️ 설정에서 Notion(토큰+대상 페이지/DB)·Dooray(토큰+프로젝트 ID)를
             등록하면 회의록 저장 시 Notion에 전체 내용이, Dooray에 액션 아이템이 업무로 자동 등록됩니다.
           </p>
@@ -2669,9 +2824,15 @@ function NewMeeting({
         <span>
           {settings.summaryProvider === "local"
             ? `요약: 로컬 ${settings.localModel || "(모델 미설정)"} @ ${settings.localBaseUrl || "(주소 미설정)"}`
-            : settings.apiKey
-              ? `요약: Gemini ${MODELS.find((m) => m.id === settings.model)?.label ?? settings.model}`
-              : "⚠️ Gemini API 키가 설정되지 않았습니다."}
+            : settings.summaryProvider === "openai"
+              ? `요약: GPT ${settings.openaiSumModel || "(모델 미설정)"}${settings.openaiKey ? "" : " ⚠️ 키 미설정"}`
+              : settings.apiKey
+                ? `요약: Gemini ${MODELS.find((m) => m.id === settings.model)?.label ?? settings.model}`
+                : "⚠️ Gemini API 키가 설정되지 않았습니다."}
+          {" · "}
+          {settings.sttProvider === "openai"
+            ? `전사: GPT ${settings.openaiSttModel || "gpt-4o-transcribe"}`
+            : `전사: Gemini ${settings.sttModel || settings.model}`}
         </span>
         <button onClick={onOpenSettings} className="font-medium text-teal-700 hover:underline">
           설정 변경
@@ -3619,14 +3780,20 @@ export default function App() {
         body: JSON.stringify({ action: "transcribe_error", detail: `${audioFile.name}: ${msg}`.slice(0, 500) }),
       }).catch(() => {});
     };
-    if (!sttKey)
-      return fail(
-        me?.can_use_admin_key
-          ? "관리자 API 키를 불러오지 못했습니다. 페이지를 새로고침한 뒤 다시 시도하고, 계속되면 관리자에게 키 등록 여부를 확인해주세요."
-          : "먼저 설정에서 Gemini API 키를 입력해주세요.",
-      );
-    if (!/^gemini-[a-z0-9.-]+$/.test(sttModel))
-      return fail("전사용 모델 ID 형식이 올바르지 않습니다 (예: gemini-2.5-flash).");
+    const sttProvider = settings.sttProvider ?? "gemini";
+    if (sttProvider === "openai") {
+      if (!settings.openaiKey?.trim())
+        return fail("먼저 설정에서 OpenAI API 키를 입력해주세요.");
+    } else {
+      if (!sttKey)
+        return fail(
+          me?.can_use_admin_key
+            ? "관리자 API 키를 불러오지 못했습니다. 페이지를 새로고침한 뒤 다시 시도하고, 계속되면 관리자에게 키 등록 여부를 확인해주세요."
+            : "먼저 설정에서 Gemini API 키를 입력해주세요.",
+        );
+      if (!/^gemini-[a-z0-9.-]+$/.test(sttModel))
+        return fail("전사용 모델 ID 형식이 올바르지 않습니다 (예: gemini-2.5-flash).");
+    }
     if (audioFile.size > MAX_AUDIO_BYTES)
       return fail("오디오가 너무 큽니다 (최대 500MB). 파일을 나눠서 올려주세요 — 잘린 각 파일은 이어서 전사해 붙일 수 있습니다.");
 
@@ -3644,7 +3811,7 @@ export default function App() {
     // - 반복 생성 루프 → 새 샘플링으로 재시도, 또 반복이면 받은 부분이라도 압축해 구제
     const transcribeWithRetry = async (fileUri, mimeType, prompt, resetLive) => {
       const salvage = (partial) =>
-        collapseRepeats(partial).trimEnd() +
+        collapseRepeats(diarizedToText(partial)).trimEnd() +
         "\n(⚠️ 이 구간은 반복 생성이 감지되어 전사가 불완전할 수 있습니다)";
       try {
         return await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, addDelta, prompt, signal);
@@ -3689,8 +3856,9 @@ export default function App() {
             : "오디오 분석 중…",
         );
         // 디코딩·리샘플링이 5분 넘게 걸리면(저사양·거대 파일) 멈춘 것으로 보고 통짜 전사로 폴백
+        // OpenAI는 파일당 25MB 제한 → 10분 넘으면 무조건 분할 (조각 WAV ≈ 19MB)
         chunks = await Promise.race([
-          splitAudioToWavChunks(audioFile),
+          splitAudioToWavChunks(audioFile, sttProvider === "openai" ? CHUNK_SEC : undefined),
           new Promise((_, rej) => setTimeout(() => rej(new Error("decode timeout")), 300_000)),
         ]);
       } catch {
@@ -3701,37 +3869,64 @@ export default function App() {
         for (let i = 0; i < chunks.length; i++) {
           if (signal.aborted) throw new Error("전사를 중지했습니다.");
           const label = `조각 ${i + 1}/${chunks.length}`;
-          const { fileUri, mimeType } = await uploadAudioToGemini(chunks[i], sttKey, (s) =>
-            setStage(`${label} · ${s}`), signal,
-          );
-          setStage(`${label} · 전사 중…`);
-          // ⚠️ 직전 전사 텍스트를 프롬프트로 넘기지 않는다(모델이 인용문을 되풀이하는 반복 사고 원인).
-          // 조각 번호만 전달하고, 혹시 모를 경계 중복은 trimOverlap으로 잘라낸다.
-          const t = collapseRepeats(
-            await transcribeWithRetry(
-              fileUri, mimeType,
-              i === 0 ? TRANSCRIBE_PROMPT : contPrompt(i + 1, chunks.length),
-              () => setTrans((p) => ({ ...p, liveText: acc ? acc + "\n" : "" })),
-            ),
-          );
+          let t;
+          if (sttProvider === "openai") {
+            setStage(`${label} · OpenAI 전사 중…`);
+            t = collapseRepeats(
+              (await transcribeWithOpenAI(
+                chunks[i], settings.openaiKey, settings.openaiSttModel || "gpt-4o-transcribe", signal,
+              )).trim(),
+            );
+          } else {
+            const { fileUri, mimeType } = await uploadAudioToGemini(chunks[i], sttKey, (s) =>
+              setStage(`${label} · ${s}`), signal,
+            );
+            setStage(`${label} · 전사 중…`);
+            // ⚠️ 직전 전사 텍스트를 프롬프트로 넘기지 않는다(모델이 인용문을 되풀이하는 반복 사고 원인).
+            // 조각 번호만 전달하고, 혹시 모를 경계 중복은 trimOverlap으로 잘라낸다.
+            t = collapseRepeats(
+              diarizedToText(
+                await transcribeWithRetry(
+                  fileUri, mimeType,
+                  i === 0 ? TRANSCRIBE_PROMPT : contPrompt(i + 1, chunks.length),
+                  () => setTrans((p) => ({ ...p, liveText: acc ? acc + "\n" : "" })),
+                ),
+              ),
+            );
+          }
           const clean = acc ? trimOverlap(acc, t.trim()) : t.trim();
           acc = acc ? acc.trimEnd() + "\n" + clean : clean;
           setTrans((p) => ({ ...p, liveText: acc + "\n" }));
         }
       } else {
-        // 짧은 파일(또는 분할 실패): 통짜 전사. 녹음 컨테이너(webm)는 Gemini 미지원 → WAV 변환
+        // 짧은 파일(또는 분할 실패): 통짜 전사. 녹음 컨테이너(webm)는 WAV로 변환,
+        // OpenAI는 25MB 제한이 있어 큰 파일도 WAV(16kHz 모노)로 축소
         let sendFile = audioFile;
-        if (/webm/i.test(audioFile.type) || /\.webm$/i.test(audioFile.name)) {
-          setStage("녹음 변환 중…");
+        if (
+          /webm/i.test(audioFile.type) || /\.webm$/i.test(audioFile.name) ||
+          (sttProvider === "openai" && audioFile.size > 24 * 1024 * 1024)
+        ) {
+          setStage("오디오 변환 중…");
           sendFile = await toWavFile(audioFile);
         }
-        const { fileUri, mimeType } = await uploadAudioToGemini(sendFile, sttKey, setStage, signal);
-        setStage("전사 중…");
-        acc = collapseRepeats(
-          await transcribeWithRetry(fileUri, mimeType, TRANSCRIBE_PROMPT, () =>
-            setTrans((p) => ({ ...p, liveText: "" })),
-          ),
-        );
+        if (sttProvider === "openai") {
+          setStage("OpenAI 전사 중…");
+          acc = collapseRepeats(
+            (await transcribeWithOpenAI(
+              sendFile, settings.openaiKey, settings.openaiSttModel || "gpt-4o-transcribe", signal,
+            )).trim(),
+          );
+        } else {
+          const { fileUri, mimeType } = await uploadAudioToGemini(sendFile, sttKey, setStage, signal);
+          setStage("전사 중…");
+          acc = collapseRepeats(
+            diarizedToText(
+              await transcribeWithRetry(fileUri, mimeType, TRANSCRIBE_PROMPT, () =>
+                setTrans((p) => ({ ...p, liveText: "" })),
+              ),
+            ),
+          );
+        }
       }
 
       // 완료 → 초안 입력란에 채움 (사용자가 어느 화면에 있든)
