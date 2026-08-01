@@ -57,6 +57,20 @@ CREATE TABLE activity_log (
 );
 CREATE INDEX activity_log_user_time ON activity_log (user_id, created_at DESC);
 
+-- API 사용량 — 브라우저가 AI 호출 후 보고 (관리자 화면의 기간·사용자별 비용 분석용)
+CREATE TABLE api_usage (
+  id            SERIAL PRIMARY KEY,
+  user_id       INT REFERENCES users(id) ON DELETE SET NULL,
+  kind          TEXT NOT NULL,
+  provider      TEXT NOT NULL,
+  model         TEXT,
+  input_tokens  BIGINT,
+  output_tokens BIGINT,
+  audio_seconds INT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX api_usage_time ON api_usage (created_at DESC);
+
 CREATE TABLE meetings (
   id         SERIAL PRIMARY KEY,
   user_id    INT REFERENCES users(id) ON DELETE CASCADE,

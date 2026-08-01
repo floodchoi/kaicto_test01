@@ -523,7 +523,8 @@ const joinGeminiParts = (body) =>
 
 const lastGeminiCandidate = (body) => (Array.isArray(body) ? body.at(-1) : body)?.candidates?.[0];
 
-async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, prompt = TRANSCRIBE_PROMPT, signal) {
+// onUsage: 사용량 보고용 콜백 — Gemini usageMetadata({promptTokenCount, candidatesTokenCount})
+async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, prompt = TRANSCRIBE_PROMPT, signal, onUsage) {
   const ctrl = new AbortController(); // 응답 정지·사용자 중지 시 연결을 강제로 끊기 위한 컨트롤러
   if (signal?.aborted) throw new Error("전사를 중지했습니다.");
   signal?.addEventListener("abort", () => ctrl.abort(), { once: true });
@@ -556,6 +557,7 @@ async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, p
     const whole = joinGeminiParts(body);
     if (whole.trim()) {
       onDelta?.(whole);
+      onUsage?.((Array.isArray(body) ? body.at(-1) : body)?.usageMetadata ?? null);
       return whole;
     }
     const cand = lastGeminiCandidate(body);
@@ -573,6 +575,7 @@ async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, p
   let full = "";
   let finishReason = "";
   let note = "";
+  let usage = null; // usageMetadata — 마지막 청크에 실려 옴 (비용 분석 보고용)
   const STALL_MS = 120_000; // 이 시간 동안 아무 데이터도 없으면 멈춘 것으로 판단
   while (true) {
     let done, value, timer;
@@ -615,6 +618,7 @@ async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, p
       }
       if (obj.error?.message) note = obj.error.message;
       if (obj.promptFeedback?.blockReason) note = "차단됨: " + obj.promptFeedback.blockReason;
+      if (obj.usageMetadata) usage = obj.usageMetadata;
       const cand = obj.candidates?.[0];
       if (cand?.finishReason) finishReason = cand.finishReason;
       const delta = cand?.content?.parts?.map((p) => p.text).filter(Boolean).join("") ?? "";
@@ -645,6 +649,7 @@ async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, p
       `전사 결과가 비어있습니다 (${why}). 오디오에 사람 음성이 들리는지, 형식(aac/m4a/mp3/wav)이 맞는지 확인하세요.`,
     );
   }
+  onUsage?.(usage);
   return full;
 }
 
@@ -823,7 +828,8 @@ function extractJson(s) {
 }
 
 // onLog(줄, replace?) — 진행 로그 콜백. replace=true면 직전 줄을 갱신(수신 글자수 등).
-async function summarizeWithGemini(text, apiKey, model, onLog, koRetry = false) {
+// onUsage — 사용량 보고(usageMetadata) 콜백 (비용 분석용)
+async function summarizeWithGemini(text, apiKey, model, onLog, koRetry = false, onUsage) {
   onLog?.(`Gemini(${model})에 요약 요청 — 원문 ${text.length.toLocaleString()}자`);
   const res = await gfetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`,
@@ -843,11 +849,13 @@ async function summarizeWithGemini(text, apiKey, model, onLog, koRetry = false) 
   onLog?.("모델 응답 대기 중… (입력이 길수록 오래 걸립니다)");
   let full = "";
   let finishReason = null;
+  let usage = null;
   if (!(res.headers.get("content-type") ?? "").includes("event-stream")) {
     // 일부 모델은 alt=sse를 무시하고 통짜 JSON으로 응답 — 전체를 받아 파트를 이어붙인다
     const body = await res.json();
     full = joinGeminiParts(body);
     finishReason = lastGeminiCandidate(body)?.finishReason ?? null;
+    usage = (Array.isArray(body) ? body.at(-1) : body)?.usageMetadata ?? null;
     if (full) onLog?.(`응답 수신 완료 — ${full.length.toLocaleString()}자`, true);
   } else {
     const reader = res.body.getReader();
@@ -873,6 +881,7 @@ async function summarizeWithGemini(text, apiKey, model, onLog, koRetry = false) 
           } catch {
             continue;
           }
+          if (obj.usageMetadata) usage = obj.usageMetadata;
           const cand = obj.candidates?.[0];
           if (cand?.finishReason) finishReason = cand.finishReason;
           const delta = cand?.content?.parts?.map((p) => p.text).filter(Boolean).join("") ?? "";
@@ -898,7 +907,9 @@ async function summarizeWithGemini(text, apiKey, model, onLog, koRetry = false) 
     );
   onLog?.("결과 파싱 중…");
   try {
-    return extractJson(full);
+    const parsed = extractJson(full);
+    onUsage?.(usage);
+    return parsed;
   } catch {
     throw new Error(
       `요약 결과 파싱 실패${finishReason === "MAX_TOKENS" ? " — 출력 길이 한도로 응답이 잘렸습니다. 더 큰 출력을 지원하는 모델을 사용하세요." : ` (수신 ${full.length.toLocaleString()}자)`}`,
@@ -908,7 +919,7 @@ async function summarizeWithGemini(text, apiKey, model, onLog, koRetry = false) 
 
 // apiKey를 주면 OpenAI(또는 인증이 필요한 호환 서버) 호출로 동작 —
 // Authorization 헤더를 붙이고, 신형 GPT 모델이 거부하는 max_tokens/temperature는 생략
-async function summarizeWithLocal(text, baseUrl, model, onLog, koRetry = false, apiKey = null) {
+async function summarizeWithLocal(text, baseUrl, model, onLog, koRetry = false, apiKey = null, onUsage) {
   // 주소 보정: 끝 슬래시 제거 + /v1 누락 시 자동 추가 (Ollama·LM Studio 모두 /v1 사용)
   let base = baseUrl.replace(/\/+$/, "");
   if (!/\/v1$/.test(base)) base += "/v1";
@@ -927,8 +938,9 @@ async function summarizeWithLocal(text, baseUrl, model, onLog, koRetry = false, 
       body: JSON.stringify({
         model,
         stream: true, // 진행 상황을 실시간으로 받기 위해 스트리밍
-        // 신형 GPT 계열은 temperature/max_tokens를 거부하는 모델이 있어 OpenAI 호출 시 생략
-        ...(apiKey ? {} : { temperature: 0.2, max_tokens: 4096 }),
+        // 신형 GPT 계열은 temperature/max_tokens를 거부하는 모델이 있어 OpenAI 호출 시 생략.
+        // OpenAI에는 스트림 마지막에 사용량(usage)을 실어달라고 요청 (비용 분석용)
+        ...(apiKey ? { stream_options: { include_usage: true } } : { temperature: 0.2, max_tokens: 4096 }),
         messages: [
           { role: "system", content: SUMMARY_SYSTEM + "\n\n" + SUMMARY_JSON_HINT },
           { role: "user", content: summaryUserPrompt(text, koRetry) },
@@ -946,6 +958,7 @@ async function summarizeWithLocal(text, baseUrl, model, onLog, koRetry = false, 
   onLog?.("모델 응답 대기 중… (모델 로딩 시 수십 초 걸릴 수 있음)");
   let content = "";
   let thinkChars = 0; // reasoning 모델의 사고 출력량 (본문과 별도)
+  let usage = null; // {prompt_tokens, completion_tokens} — 비용 분석 보고용
   if (res.headers.get("content-type")?.includes("event-stream")) {
     // OpenAI 호환 SSE. 서버마다 조금씩 달라 관대하게 파싱:
     // 구분자 \n\n·\r\n\r\n, 이벤트당 data: 여러 줄, 본문은 delta.content 외에
@@ -970,6 +983,7 @@ async function summarizeWithLocal(text, baseUrl, model, onLog, koRetry = false, 
           } catch {
             continue;
           }
+          if (obj.usage) usage = obj.usage;
           const c = obj.choices?.[0] ?? {};
           const delta = c.delta?.content ?? c.delta?.text ?? c.message?.content ?? c.text ?? "";
           const think = c.delta?.reasoning_content ?? c.delta?.reasoning ?? "";
@@ -987,6 +1001,7 @@ async function summarizeWithLocal(text, baseUrl, model, onLog, koRetry = false, 
     // 스트리밍 미지원 서버 폴백: 일반 JSON 응답
     const body = await res.json();
     content = body.choices?.[0]?.message?.content ?? body.choices?.[0]?.text ?? "";
+    if (body.usage) usage = body.usage;
   }
 
   if (!content.trim())
@@ -997,7 +1012,9 @@ async function summarizeWithLocal(text, baseUrl, model, onLog, koRetry = false, 
     );
   onLog?.("결과 파싱 중…");
   try {
-    return extractJson(content);
+    const parsed = extractJson(content);
+    onUsage?.(usage);
+    return parsed;
   } catch {
     const looksTruncated = /[{[,:"]\s*$/.test(stripFences(content).trimEnd());
     throw new Error(
@@ -1010,7 +1027,7 @@ async function summarizeWithLocal(text, baseUrl, model, onLog, koRetry = false, 
 
 // 제공자 분기 — onLog(줄, replace?)로 진행 상황을 실시간 보고.
 // 결과가 영어로 나오면(입력 언어를 따라간 사고) 한국어 강제 지시로 1회 재요청.
-async function summarizeText(text, settings, onLog) {
+async function summarizeText(text, settings, onLog, onUsage) {
   const p = settings.summaryProvider;
   if (p === "local") {
     if (!settings.localBaseUrl?.trim()) throw new Error("로컬 서버 주소를 설정에서 입력해주세요.");
@@ -1023,10 +1040,10 @@ async function summarizeText(text, settings, onLog) {
   }
   const run = (koRetry) =>
     p === "local"
-      ? summarizeWithLocal(text, settings.localBaseUrl, settings.localModel, onLog, koRetry)
+      ? summarizeWithLocal(text, settings.localBaseUrl, settings.localModel, onLog, koRetry, null, onUsage)
       : p === "openai"
-        ? summarizeWithLocal(text, "https://api.openai.com/v1", settings.openaiSumModel, onLog, koRetry, settings.openaiKey)
-        : summarizeWithGemini(text, settings.apiKey, settings.model, onLog, koRetry);
+        ? summarizeWithLocal(text, "https://api.openai.com/v1", settings.openaiSumModel, onLog, koRetry, settings.openaiKey, onUsage)
+        : summarizeWithGemini(text, settings.apiKey, settings.model, onLog, koRetry, onUsage);
 
   let result = await run(false);
   const sample = [
@@ -1872,6 +1889,14 @@ function AdminUsers({ onBack }) {
     load();
   }, []);
 
+  // API 사용량·비용 (기간별) — 기본 최근 30일
+  const [usage, setUsage] = useState(null);
+  const [uFrom, setUFrom] = useState(() => new Date(Date.now() - 29 * 86400000).toLocaleDateString("sv"));
+  const [uTo, setUTo] = useState(() => new Date().toLocaleDateString("sv"));
+  useEffect(() => {
+    api(`/api/usage?from=${uFrom}&to=${uTo}`).then(setUsage).catch(() => setUsage([]));
+  }, [uFrom, uTo]);
+
   // 활동 로그 (최근 100건, 이메일 필터)
   const [logs, setLogs] = useState(null);
   const [logEmail, setLogEmail] = useState("");
@@ -2085,6 +2110,87 @@ function AdminUsers({ onBack }) {
         </ul>
       </section>
 
+      {/* API 사용량·비용 — 기간·사용자별 집계 (브라우저가 보고한 토큰·오디오 길이 기반 추정) */}
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex flex-wrap items-center gap-2">
+          <h3 className="text-sm font-semibold text-slate-800">API 사용량·비용 (추정)</h3>
+          <span className="ml-auto flex items-center gap-2">
+            <input type="date" value={uFrom} onChange={(e) => setUFrom(e.target.value)}
+              className="rounded-xl border border-slate-200 px-2 py-1.5 text-sm text-slate-600 outline-none focus:border-teal-500" />
+            <span className="text-slate-400">~</span>
+            <input type="date" value={uTo} onChange={(e) => setUTo(e.target.value)}
+              className="rounded-xl border border-slate-200 px-2 py-1.5 text-sm text-slate-600 outline-none focus:border-teal-500" />
+          </span>
+        </div>
+        {usage === null ? (
+          <p className="mt-3 text-sm text-slate-400">불러오는 중…</p>
+        ) : usage.length === 0 ? (
+          <p className="mt-3 text-sm text-slate-400">이 기간의 사용 기록이 없습니다.</p>
+        ) : (() => {
+          const byUser = {};
+          usage.forEach((r) => {
+            const k = r.email ?? "(탈퇴)";
+            (byUser[k] ??= { calls: 0, secs: 0, inT: 0, outT: 0, cost: 0, models: {} }).calls += r.calls;
+            byUser[k].secs += Number(r.audio_seconds) || 0;
+            byUser[k].inT += Number(r.in_tokens) || 0;
+            byUser[k].outT += Number(r.out_tokens) || 0;
+            const c = estCostUSD(r);
+            byUser[k].cost += c;
+            const mk = `${r.kind === "stt" ? "전사" : "요약"}·${r.provider}·${r.model ?? "?"}`;
+            byUser[k].models[mk] = (byUser[k].models[mk] ?? 0) + c;
+          });
+          const users = Object.entries(byUser);
+          const total = users.reduce(
+            (a, [, v]) => ({ calls: a.calls + v.calls, secs: a.secs + v.secs, inT: a.inT + v.inT, outT: a.outT + v.outT, cost: a.cost + v.cost }),
+            { calls: 0, secs: 0, inT: 0, outT: 0, cost: 0 },
+          );
+          const $ = (c) => (c > 0 && c < 0.005 ? "<$0.01" : `$${c.toFixed(2)}`);
+          return (
+            <div className="mt-3 overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-slate-100 text-left text-xs uppercase tracking-wide text-slate-400">
+                    <th className="px-2 py-2">사용자</th>
+                    <th className="px-2 py-2">호출</th>
+                    <th className="px-2 py-2">전사 오디오</th>
+                    <th className="px-2 py-2">입력 토큰</th>
+                    <th className="px-2 py-2">출력 토큰</th>
+                    <th className="px-2 py-2">추정 비용</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {users.map(([email, v]) => (
+                    <tr key={email} className="border-b border-slate-50">
+                      <td className="whitespace-nowrap px-2 py-1.5 text-xs text-slate-600">{email}</td>
+                      <td className="whitespace-nowrap px-2 py-1.5 text-xs text-slate-500">{v.calls}회</td>
+                      <td className="whitespace-nowrap px-2 py-1.5 text-xs text-slate-500">{v.secs ? `${Math.round(v.secs / 60)}분` : "—"}</td>
+                      <td className="whitespace-nowrap px-2 py-1.5 text-xs text-slate-500">{v.inT.toLocaleString()}</td>
+                      <td className="whitespace-nowrap px-2 py-1.5 text-xs text-slate-500">{v.outT.toLocaleString()}</td>
+                      <td className="whitespace-nowrap px-2 py-1.5 text-xs font-medium text-slate-700"
+                        title={Object.entries(v.models).map(([m, c]) => `${m}: ${$(c)}`).join("\n")}>
+                        {$(v.cost)}
+                      </td>
+                    </tr>
+                  ))}
+                  <tr className="bg-slate-50 font-semibold">
+                    <td className="px-2 py-1.5 text-xs text-slate-700">합계</td>
+                    <td className="px-2 py-1.5 text-xs text-slate-700">{total.calls}회</td>
+                    <td className="px-2 py-1.5 text-xs text-slate-700">{total.secs ? `${Math.round(total.secs / 60)}분` : "—"}</td>
+                    <td className="px-2 py-1.5 text-xs text-slate-700">{total.inT.toLocaleString()}</td>
+                    <td className="px-2 py-1.5 text-xs text-slate-700">{total.outT.toLocaleString()}</td>
+                    <td className="px-2 py-1.5 text-xs text-slate-700">{$(total.cost)}</td>
+                  </tr>
+                </tbody>
+              </table>
+              <p className="mt-2 text-xs text-slate-400">
+                브라우저가 보고한 토큰·오디오 길이에 공식 단가표를 곱한 <b>추정치</b>입니다 — 실제 청구액과 다를 수
+                있습니다 (무료 등급 사용 시 실제 비용 0원). 비용 칸에 마우스를 올리면 모델별 내역이 보입니다.
+              </p>
+            </div>
+          );
+        })()}
+      </section>
+
       {/* 활동 로그 — 로그인·회의록 작업·멤버 변경 + 브라우저에서 보고된 전사/요약 오류 */}
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
         <div className="flex flex-wrap items-center gap-2">
@@ -2130,6 +2236,49 @@ function AdminUsers({ onBack }) {
       </section>
     </div>
   );
+}
+
+// ── API 비용 추정용 단가표 (USD / 1M 토큰, OpenAI 전사는 USD/분) ──
+// ⚠️ 추정치 전용 — 제공자 가격 변경 시 여기만 갱신하면 과거 데이터에도 소급 적용됨
+const USAGE_PRICE = {
+  gemini: {
+    "gemini-2.5-pro": { in: 1.25, audioIn: 1.25, out: 10 },
+    "gemini-2.5-flash": { in: 0.3, audioIn: 1.0, out: 2.5 },
+    "gemini-2.5-flash-lite": { in: 0.1, audioIn: 0.3, out: 0.4 },
+    "gemini-3.1-flash-lite": { in: 0.25, audioIn: 0.5, out: 1.5 },
+    "gemini-3.5-flash-lite": { in: 0.3, audioIn: 0.3, out: 2.5 },
+    _default: { in: 0.3, audioIn: 1.0, out: 2.5 },
+  },
+  openaiChat: {
+    "gpt-5.6-luna": { in: 0.2, out: 1.2 },
+    "gpt-4o-mini": { in: 0.15, out: 0.6 },
+    "gpt-4o": { in: 2.5, out: 10 },
+    _default: { in: 0.2, out: 1.2 },
+  },
+  openaiSttPerMin: {
+    "gpt-4o-transcribe": 0.006,
+    "gpt-4o-mini-transcribe": 0.003,
+    "whisper-1": 0.006,
+    "gpt-transcribe": 0.0045,
+    _default: 0.006,
+  },
+};
+
+// 집계 행(제공자·모델·종류별 합산) → 추정 비용(USD)
+function estCostUSD(r) {
+  const inT = Number(r.in_tokens) || 0;
+  const outT = Number(r.out_tokens) || 0;
+  const secs = Number(r.audio_seconds) || 0;
+  if (r.provider === "local") return 0;
+  if (r.provider === "openai") {
+    if (r.kind === "stt")
+      return (secs / 60) * (USAGE_PRICE.openaiSttPerMin[r.model] ?? USAGE_PRICE.openaiSttPerMin._default);
+    const p = USAGE_PRICE.openaiChat[r.model] ?? USAGE_PRICE.openaiChat._default;
+    return (inT / 1e6) * p.in + (outT / 1e6) * p.out;
+  }
+  const p = USAGE_PRICE.gemini[r.model] ?? USAGE_PRICE.gemini._default;
+  // 전사 입력은 대부분 오디오 토큰이라 오디오 단가로 계산
+  return (inT / 1e6) * (r.kind === "stt" ? p.audioIn : p.in) + (outT / 1e6) * p.out;
 }
 
 // 활동 로그 행위 한글 라벨
@@ -2554,7 +2703,27 @@ function NewMeeting({
       setSumLog((p) => (replace && p.length ? [...p.slice(0, -1), entry] : [...p, entry]));
     };
     try {
-      const result = await summarizeText(text, settings, log);
+      // 사용량 집계(재시도 포함 누적) — Gemini(usageMetadata)·OpenAI(usage) 형식 모두 수용
+      const used = { in: 0, out: 0 };
+      const addUsage = (x) => {
+        used.in += x?.promptTokenCount ?? x?.prompt_tokens ?? 0;
+        used.out += x?.candidatesTokenCount ?? x?.completion_tokens ?? 0;
+      };
+      const result = await summarizeText(text, settings, log, addUsage);
+      // 관리자 비용 분석용 사용량 보고 (실패해도 무시)
+      api("/api/usage", {
+        method: "POST",
+        body: JSON.stringify({
+          kind: "summary",
+          provider: settings.summaryProvider === "local" ? "local" : settings.summaryProvider === "openai" ? "openai" : "gemini",
+          model:
+            settings.summaryProvider === "local" ? settings.localModel
+            : settings.summaryProvider === "openai" ? settings.openaiSumModel
+            : settings.model,
+          input_tokens: used.in || null,
+          output_tokens: used.out || null,
+        }),
+      }).catch(() => {});
       // 필드 누락 응답도 편집 UI가 안전하게 다루도록 정규화
       setPreview({
         summary: result.summary ?? [],
@@ -3806,6 +3975,14 @@ export default function App() {
     transCancelRef.current = cancel;
     const signal = cancel.signal;
 
+    // 사용량 집계 (조각·재시도 누적) — 관리자 비용 분석 보고용
+    const used = { in: 0, out: 0 };
+    const addUsage = (u) => {
+      used.in += u?.promptTokenCount ?? 0;
+      used.out += u?.candidatesTokenCount ?? 0;
+    };
+    let audioSecs = null;
+
     // 전사 수신 도중 문제가 생기면 해당 조각을 1회 자동 재시도:
     // - 네트워크 끊김/정지 → 복구 대기 후 재시도
     // - 반복 생성 루프 → 새 샘플링으로 재시도, 또 반복이면 받은 부분이라도 압축해 구제
@@ -3814,14 +3991,14 @@ export default function App() {
         collapseRepeats(diarizedToText(partial)).trimEnd() +
         "\n(⚠️ 이 구간은 반복 생성이 감지되어 전사가 불완전할 수 있습니다)";
       try {
-        return await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, addDelta, prompt, signal);
+        return await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, addDelta, prompt, signal, addUsage);
       } catch (e) {
         if (signal.aborted) throw e; // 사용자 중지는 재시도하지 않음
         if (/반복 생성/.test(e.message)) {
           setStage("반복 생성 감지 — 조각 재시도 중…");
           resetLive();
           try {
-            return await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, addDelta, prompt, signal);
+            return await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, addDelta, prompt, signal, addUsage);
           } catch (e2) {
             const partial = e2.partial ?? e.partial;
             if (partial?.trim()) {
@@ -3836,7 +4013,7 @@ export default function App() {
         await waitOnline();
         resetLive(); // 부분 수신분 정리 후 다시
         setStage("연결 복구 — 재시도 중…");
-        return await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, addDelta, prompt, signal);
+        return await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, addDelta, prompt, signal, addUsage);
       }
     };
 
@@ -3866,6 +4043,7 @@ export default function App() {
       }
 
       if (chunks) {
+        audioSecs = Math.round(chunks.reduce((n, c) => n + c.size, 0) / 32000); // 16kHz 모노 16bit WAV
         for (let i = 0; i < chunks.length; i++) {
           if (signal.aborted) throw new Error("전사를 중지했습니다.");
           const label = `조각 ${i + 1}/${chunks.length}`;
@@ -3909,6 +4087,8 @@ export default function App() {
           setStage("오디오 변환 중…");
           sendFile = await toWavFile(audioFile);
         }
+        if (/wav/i.test(sendFile.type) || /\.wav$/i.test(sendFile.name))
+          audioSecs = Math.round(sendFile.size / 32000);
         if (sttProvider === "openai") {
           setStage("OpenAI 전사 중…");
           acc = collapseRepeats(
@@ -3934,6 +4114,19 @@ export default function App() {
         ...prev,
         text: prev.text.trim() ? prev.text.trimEnd() + "\n\n" + acc : acc,
       }));
+
+      // 관리자 비용 분석용 사용량 보고 (실패해도 무시)
+      api("/api/usage", {
+        method: "POST",
+        body: JSON.stringify({
+          kind: "stt",
+          provider: sttProvider,
+          model: sttProvider === "openai" ? (settings.openaiSttModel || "gpt-4o-transcribe") : sttModel,
+          input_tokens: used.in || null,
+          output_tokens: used.out || null,
+          audio_seconds: audioSecs,
+        }),
+      }).catch(() => {});
 
       // 제목 자동 추천 — 초안 제목이 비어있을 때만 적용 (실패해도 무시)
       try {

@@ -71,6 +71,7 @@ export default wrap(async function handler(req, res) {
               notion_token_enc, notion_target_id, notion_target_type,
               dooray_token_enc, dooray_project_id,
               (SELECT 1 FROM activity_log WHERE false) AS _probe_log,
+              (SELECT 1 FROM api_usage WHERE false) AS _probe_usage,
               (SELECT tz FROM meetings WHERE false) AS _probe_tz`;
   if (!me) return res.status(401).json({ error: "로그인이 필요합니다." });
 

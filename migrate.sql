@@ -65,6 +65,20 @@ CREATE TABLE IF NOT EXISTS activity_log (
 );
 CREATE INDEX IF NOT EXISTS activity_log_user_time ON activity_log (user_id, created_at DESC);
 
+-- 3-3) API 사용량 — 브라우저가 AI 호출 후 보고 (관리자 화면의 기간·사용자별 비용 분석용)
+CREATE TABLE IF NOT EXISTS api_usage (
+  id            SERIAL PRIMARY KEY,
+  user_id       INT REFERENCES users(id) ON DELETE SET NULL,
+  kind          TEXT NOT NULL,          -- 'stt' | 'summary'
+  provider      TEXT NOT NULL,          -- 'gemini' | 'openai' | 'local'
+  model         TEXT,
+  input_tokens  BIGINT,
+  output_tokens BIGINT,
+  audio_seconds INT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS api_usage_time ON api_usage (created_at DESC);
+
 -- 4) meetings (원본 테이블은 초기 schema.sql로 생성돼 있다고 가정)
 ALTER TABLE meetings
   ADD COLUMN IF NOT EXISTS user_id    INT REFERENCES users(id) ON DELETE CASCADE,
