@@ -1,6 +1,6 @@
-import { sql } from "./_db.js";
-import { wrap } from "./_wrap.js";
-import { requireAuth } from "./_auth.js";
+import { sql } from "../_db.js";
+import { wrap } from "../_wrap.js";
+import { requireAuth } from "../_auth.js";
 
 // GET /api/users?q=... → 이메일 검색 (프로젝트 멤버 지정용). 로그인 필수, 2자 이상.
 export default wrap(async function handler(req, res) {

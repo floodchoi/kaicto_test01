@@ -1,7 +1,15 @@
 {
   "functions": {
-    "api/migrate.js": { "includeFiles": "migrate.sql" }
+    "api/misc.js": { "includeFiles": "migrate.sql" }
   },
+  "rewrites": [
+    { "source": "/api/users", "destination": "/api/misc?fn=users" },
+    { "source": "/api/log", "destination": "/api/misc?fn=log" },
+    { "source": "/api/usage", "destination": "/api/misc?fn=usage" },
+    { "source": "/api/integrations", "destination": "/api/misc?fn=integrations" },
+    { "source": "/api/invite-codes", "destination": "/api/misc?fn=invite-codes" },
+    { "source": "/api/migrate", "destination": "/api/misc?fn=migrate" }
+  ],
   "headers": [
     {
       "source": "/(.*)",

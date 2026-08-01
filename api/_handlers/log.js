@@ -1,7 +1,7 @@
-import { sql } from "./_db.js";
-import { wrap } from "./_wrap.js";
-import { requireAuth } from "./_auth.js";
-import { logAct } from "./_log.js";
+import { sql } from "../_db.js";
+import { wrap } from "../_wrap.js";
+import { requireAuth } from "../_auth.js";
+import { logAct } from "../_log.js";
 
 // 브라우저에서 일어난 오류 보고용 액션 화이트리스트 (전사·요약은 브라우저→Gemini 직행이라
 // 서버가 모름 — 실패 시 브라우저가 여기로 보고해야 관리자가 원인을 추적할 수 있다)

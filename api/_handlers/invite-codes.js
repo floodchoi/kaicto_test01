@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
-import { sql } from "./_db.js";
-import { wrap } from "./_wrap.js";
-import { requireAuth } from "./_auth.js";
+import { sql } from "../_db.js";
+import { wrap } from "../_wrap.js";
+import { requireAuth } from "../_auth.js";
 
 // 초대 코드 관리 (관리자 전용)
 // GET    /api/invite-codes → 목록 (사용량 포함)

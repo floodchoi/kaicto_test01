@@ -1,10 +1,10 @@
-import { sql } from "./_db.js";
-import { wrap } from "./_wrap.js";
-import { requireAuth, decryptSecret, decryptText } from "./_auth.js";
-import { testNotion, pushToNotion } from "./_notion.js";
-import { testDooray, pushTasksToDooray } from "./_dooray.js";
-import { editCond } from "./meetings.js";
-import { logAct } from "./_log.js";
+import { sql } from "../_db.js";
+import { wrap } from "../_wrap.js";
+import { requireAuth, decryptSecret, decryptText } from "../_auth.js";
+import { testNotion, pushToNotion } from "../_notion.js";
+import { testDooray, pushTasksToDooray } from "../_dooray.js";
+import { editCond } from "../meetings.js";
+import { logAct } from "../_log.js";
 
 // POST /api/integrations
 //  { action: "notion_test" | "dooray_test" }   → 연결 확인 (설정 화면의 [연결 테스트])

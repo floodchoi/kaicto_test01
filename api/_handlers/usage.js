@@ -1,6 +1,6 @@
-import { sql } from "./_db.js";
-import { wrap } from "./_wrap.js";
-import { requireAuth } from "./_auth.js";
+import { sql } from "../_db.js";
+import { wrap } from "../_wrap.js";
+import { requireAuth } from "../_auth.js";
 
 const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
 const KINDS = new Set(["stt", "summary"]);
