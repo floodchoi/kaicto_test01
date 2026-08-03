@@ -1199,7 +1199,7 @@ function Login({ onLogin }) {
 const INPUT_CLS =
   "mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100";
 
-function Settings({ settings, me, onSave, onClose }) {
+function Settings({ settings, me, onSave, onServerSaved, onClose }) {
   const [apiKey, setApiKey] = useState(settings.apiKey);
   const [apiKey2, setApiKey2] = useState(settings.apiKey2 ?? "");
   const [model, setModel] = useState(settings.model);
@@ -1341,6 +1341,7 @@ function Settings({ settings, me, onSave, onClose }) {
             ...integ,
           }),
         });
+        onServerSaved?.(); // 서버 저장 '완료 후'에 계정 정보 재조회 (새 키가 옛 키로 덮이지 않게)
       } catch (e) {
         setSaveError(`저장 실패 (브라우저 설정은 저장되었습니다): ${e.message}`);
         setSaving(false);
@@ -4513,10 +4514,10 @@ export default function App() {
         <Settings
           settings={settings}
           me={me}
-          onSave={(next) => {
-            setSettings(next);
-            refreshMe(); // 키 변경 반영 (관리자 키 ↔ 본인 키 전환 상태 갱신)
-          }}
+          onSave={setSettings}
+          /* ⚠️ refreshMe는 서버 PUT '완료 후'에만 — PUT 전에 부르면 GET이 먼저 끝나
+             서버의 옛 키가 방금 입력한 새 키를 덮어쓰는 경쟁 조건이 생긴다 */
+          onServerSaved={refreshMe}
           onClose={() => setShowSettings(false)}
         />
       )}
