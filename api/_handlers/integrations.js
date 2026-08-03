@@ -30,56 +30,108 @@ export default wrap(async function handler(req, res) {
   }
 
   const action = req.body?.action;
+  const hasNotion = !!(u?.notion_token_enc && u?.notion_target_id);
+  const hasDooray = !!(u?.dooray_token_enc && u?.dooray_project_id);
 
-  if (action === "sync") {
-    const meetingId = Number(req.body?.meetingId);
-    const hasNotion = !!(u?.notion_token_enc && u?.notion_target_id);
-    const hasDooray = !!(u?.dooray_token_enc && u?.dooray_project_id);
-    if (!hasNotion && !hasDooray)
-      return res.status(400).json({ error: "먼저 ⚙️ 설정에서 Notion 또는 Dooray 연동을 등록해주세요." });
-
+  // 회의록 1건 로드(권한 검사 포함) + 전송용 데이터 구성. 없으면 null.
+  const loadMeeting = async (meetingId) => {
     const [m] = await sql`
-      SELECT m.* FROM meetings m WHERE m.id = ${meetingId} AND ${editCond(userId)}`;
-    if (!m) return res.status(404).json({ error: "회의록을 찾을 수 없습니다." });
+      SELECT m.*, p.name AS project_name FROM meetings m
+      LEFT JOIN projects p ON p.id = m.project_id
+      WHERE m.id = ${meetingId} AND ${editCond(userId)}`;
+    if (!m) return null;
     const items = await sql`
       SELECT task, assignee, due_date, done FROM action_items WHERE meeting_id = ${meetingId} ORDER BY id`;
-    const data = {
-      title: m.title,
-      text: decryptText(m.raw_text),
-      summary: m.summary ?? [],
-      agenda: m.agenda ?? [],
-      action_items: items,
-      tags: m.tags ?? [],
+    return {
+      m,
+      data: {
+        title: m.title,
+        text: decryptText(m.raw_text),
+        summary: m.summary ?? [],
+        agenda: m.agenda ?? [],
+        action_items: items,
+        tags: m.tags ?? [],
+        project: m.project_name ?? null,
+        meetingId: m.id,
+      },
     };
+  };
 
+  // 한 회의록을 Notion/Dooray로 전송 (성공 시 synced_at 기록). skipSynced=true면 이미 전송분 건너뜀.
+  const sendOne = async ({ m, data }, skipSynced, label = "") => {
     const out = {};
     if (hasNotion) {
-      try {
-        const url = await pushToNotion(
-          { token: decryptSecret(u.notion_token_enc), targetId: u.notion_target_id, targetType: u.notion_target_type ?? "database" },
-          data,
-        );
-        out.notion = { ok: true, url };
-        await logAct(userId, "notion_sync", `#${meetingId} ${m.title} (재전송)${url ? ` → ${url}` : ""}`);
-      } catch (e) {
-        out.notion = { ok: false, error: e.message };
-        await logAct(userId, "notion_error", `#${meetingId} (재전송) ${e.message}`);
+      if (skipSynced && m.notion_synced_at) out.notion = { skipped: true };
+      else {
+        try {
+          const url = await pushToNotion(
+            { token: decryptSecret(u.notion_token_enc), targetId: u.notion_target_id, targetType: u.notion_target_type ?? "database" },
+            data,
+          );
+          out.notion = { ok: true, url };
+          await sql`UPDATE meetings SET notion_synced_at = now() WHERE id = ${m.id}`;
+          await logAct(userId, "notion_sync", `#${m.id} ${m.title}${label}${url ? ` → ${url}` : ""}`);
+        } catch (e) {
+          out.notion = { ok: false, error: e.message };
+          await logAct(userId, "notion_error", `#${m.id}${label} ${e.message}`);
+        }
       }
     }
-    if (hasDooray && items.length) {
-      try {
-        const r = await pushTasksToDooray(
-          { token: decryptSecret(u.dooray_token_enc), projectId: u.dooray_project_id },
-          data,
-        );
-        out.dooray = { ok: true, ...r };
-        await logAct(userId, "dooray_sync", `#${meetingId} 업무 ${r.created}건 등록 (재전송)`);
-      } catch (e) {
-        out.dooray = { ok: false, error: e.message };
-        await logAct(userId, "dooray_error", `#${meetingId} (재전송) ${e.message}`);
+    if (hasDooray && data.action_items.length) {
+      if (skipSynced && m.dooray_synced_at) out.dooray = { skipped: true };
+      else {
+        try {
+          const r = await pushTasksToDooray(
+            { token: decryptSecret(u.dooray_token_enc), projectId: u.dooray_project_id },
+            data,
+          );
+          out.dooray = { ok: true, ...r };
+          await sql`UPDATE meetings SET dooray_synced_at = now() WHERE id = ${m.id}`;
+          await logAct(userId, "dooray_sync", `#${m.id} 업무 ${r.created}건 등록${label}`);
+        } catch (e) {
+          out.dooray = { ok: false, error: e.message };
+          await logAct(userId, "dooray_error", `#${m.id}${label} ${e.message}`);
+        }
       }
     }
-    return res.status(200).json(out);
+    return out;
+  };
+
+  if (action === "sync") {
+    if (!hasNotion && !hasDooray)
+      return res.status(400).json({ error: "먼저 ⚙️ 설정에서 Notion 또는 Dooray 연동을 등록해주세요." });
+    const loaded = await loadMeeting(Number(req.body?.meetingId));
+    if (!loaded) return res.status(404).json({ error: "회의록을 찾을 수 없습니다." });
+    // 상세 화면의 수동 재전송 — 이미 전송됐어도 강제 재전송 (중복 경고는 UI에서)
+    return res.status(200).json(await sendOne(loaded, false, " (재전송)"));
+  }
+
+  // 목록에서 여러 회의록 일괄 전송 — 이미 전송된 회의록은 자동 건너뜀
+  if (action === "bulk_sync") {
+    if (!hasNotion && !hasDooray)
+      return res.status(400).json({ error: "먼저 ⚙️ 설정에서 Notion 또는 Dooray 연동을 등록해주세요." });
+    const ids = [...new Set((req.body?.meetingIds ?? []).map(Number).filter((n) => Number.isInteger(n) && n > 0))].slice(0, 30);
+    if (!ids.length) return res.status(400).json({ error: "전송할 회의록을 선택해주세요." });
+
+    const summary = { sent: 0, skipped: 0, failed: 0, missing: 0, errors: [] };
+    for (const id of ids) {
+      const loaded = await loadMeeting(id);
+      if (!loaded) {
+        summary.missing++;
+        continue;
+      }
+      const out = await sendOne(loaded, true, " (일괄)");
+      const parts = [out.notion, out.dooray].filter(Boolean);
+      if (parts.some((p) => p.ok)) summary.sent++;
+      else if (parts.length && parts.every((p) => p.skipped)) summary.skipped++;
+      else if (parts.some((p) => p.error)) {
+        summary.failed++;
+        if (summary.errors.length < 3)
+          summary.errors.push(`#${id}: ${parts.find((p) => p.error)?.error}`);
+      } else summary.skipped++; // 보낼 것이 없던 경우(예: Dooray만 설정 + 액션아이템 없음)
+    }
+    await logAct(userId, "notion_sync", `일괄 전송: 성공 ${summary.sent} · 건너뜀 ${summary.skipped} · 실패 ${summary.failed}`);
+    return res.status(200).json(summary);
   }
   if (action === "notion_test") {
     if (!u?.notion_token_enc || !u?.notion_target_id)

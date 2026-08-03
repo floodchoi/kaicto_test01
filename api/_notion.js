@@ -29,7 +29,7 @@ const bullet = (t) => ({ object: "block", type: "bulleted_list_item", bulleted_l
 const todo = (t, checked) => ({ object: "block", type: "to_do", to_do: { rich_text: rt(t), checked: !!checked } });
 
 // 회의록 → Notion 블록 (요약·아젠다·액션 아이템·태그·원문). 최대 100블록 제한 준수.
-export function buildBlocks({ summary, agenda, action_items, tags, text }) {
+export function buildBlocks({ summary, agenda, action_items, tags, text, project, meetingId }) {
   const blocks = [];
   if (summary?.length) {
     blocks.push(heading("3줄 요약"));
@@ -50,7 +50,9 @@ export function buildBlocks({ summary, agenda, action_items, tags, text }) {
       ),
     );
   }
+  if (project) blocks.push(para("프로젝트: " + project));
   if (tags?.length) blocks.push(para("태그: " + tags.join(", ")));
+  if (meetingId != null) blocks.push(para("회의록 ID: MM-" + meetingId));
   blocks.push(heading("회의 원문"));
   const t = String(text ?? "");
   let written = 0;
@@ -115,6 +117,21 @@ export async function pushToNotion({ token, targetId, targetType }, meeting) {
       };
     const dateProp = findProp("date");
     if (dateProp) properties[dateProp] = { date: { start: new Date().toISOString() } };
+    // 프로젝트 이름: '프로젝트'/'Project' 이름의 속성 우선, 없으면 첫 select 속성에 매핑
+    if (meeting.project) {
+      const byName = Object.keys(props).find((k) => /^(프로젝트|project)$/i.test(k.trim()));
+      const key = byName ?? findProp("select");
+      const t = key && props[key].type;
+      if (t === "select") properties[key] = { select: { name: String(meeting.project).slice(0, 90) } };
+      else if (t === "rich_text") properties[key] = { rich_text: rt(meeting.project) };
+    }
+    // 회의록 ID: '회의록 ID'/'Meeting ID' 이름의 속성이 있으면 채움 (없으면 본문에만 기록)
+    if (meeting.meetingId != null) {
+      const key = Object.keys(props).find((k) => /회의록\s*id|meeting\s*id/i.test(k));
+      const t = key && props[key].type;
+      if (t === "number") properties[key] = { number: Number(meeting.meetingId) };
+      else if (t === "rich_text") properties[key] = { rich_text: rt("MM-" + meeting.meetingId) };
+    }
     body = { parent: { database_id: id }, properties, children };
   }
   const res = await fetch(`${BASE}/v1/pages`, {

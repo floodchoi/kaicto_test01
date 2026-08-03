@@ -2382,7 +2382,7 @@ function Help({ onClose }) {
 }
 
 /* ── 대시보드: 회의록 리스트 + 검색(키워드·날짜 범위) ─────── */
-function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, onCancelTrans, projects, projectFilter, setProjectFilter, onManageProjects, draftPreview }) {
+function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, onCancelTrans, projects, projectFilter, setProjectFilter, onManageProjects, draftPreview, me }) {
   // 첫 페인트 가속: 직전 목록을 캐시에서 즉시 보여주고 서버 응답으로 교체
   // (서버리스 콜드 스타트·DB 웨이크업 동안 빈 화면 대신 이전 목록이 보임)
   const [meetings, setMeetings] = useState(() => {
@@ -2422,6 +2422,43 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, onCancelTr
   }, [q, from, to, projectFilter]);
 
   const hasFilter = q || from || to || projectFilter;
+
+  // ☑ 선택 모드 — 여러 회의록을 골라 Notion/Dooray로 일괄 전송 (이미 전송분은 서버가 건너뜀)
+  const canBulk = me?.has_notion_token || me?.has_dooray_token;
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState(() => new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkMsg, setBulkMsg] = useState(null);
+  const toggleSelect = (id) =>
+    setSelected((p) => {
+      const n = new Set(p);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  const openOrSelect = (id) => (selectMode ? toggleSelect(id) : onOpen(id));
+  const bulkSend = async () => {
+    if (!selected.size) return;
+    if (!confirm(`선택한 ${selected.size}개 회의록을 Notion/Dooray로 전송할까요?\n이미 전송된 회의록은 자동으로 건너뜁니다.`)) return;
+    setBulkBusy(true);
+    setBulkMsg(null);
+    try {
+      const r = await api("/api/integrations", {
+        method: "POST",
+        body: JSON.stringify({ action: "bulk_sync", meetingIds: [...selected] }),
+      });
+      setBulkMsg(
+        `↗ 일괄 전송 완료 — 성공 ${r.sent}건 · 이미 전송돼 건너뜀 ${r.skipped}건 · 실패 ${r.failed}건` +
+          (r.errors?.length ? ` (${r.errors[0]})` : ""),
+      );
+      setSelected(new Set());
+      setSelectMode(false);
+    } catch (e) {
+      setBulkMsg("⚠️ " + e.message);
+    } finally {
+      setBulkBusy(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -2469,6 +2506,17 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, onCancelTr
             </button>
           ))}
         </div>
+        {canBulk && (
+          <button
+            onClick={() => { setSelectMode(!selectMode); setSelected(new Set()); setBulkMsg(null); }}
+            title="여러 회의록을 선택해 Notion/Dooray로 일괄 전송"
+            className={`rounded-xl border px-2.5 py-2 text-sm shadow-sm ${
+              selectMode ? "border-teal-500 bg-teal-50 text-teal-700" : "border-slate-200 bg-white text-slate-500 hover:bg-slate-50"
+            }`}
+          >
+            ☑ 선택
+          </button>
+        )}
         <button
           onClick={onNew}
           className="rounded-xl bg-teal-700 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-teal-600"
@@ -2476,6 +2524,24 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, onCancelTr
           + 새 회의록
         </button>
       </div>
+
+      {selectMode && (
+        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-teal-200 bg-teal-50 px-4 py-2.5 text-sm text-teal-800">
+          <span>{selected.size}개 선택 — 회의록을 클릭해 선택/해제하세요</span>
+          <button onClick={bulkSend} disabled={bulkBusy || !selected.size}
+            className="ml-auto rounded-lg bg-teal-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-teal-600 disabled:opacity-40">
+            {bulkBusy ? "전송 중…" : "↗ Notion/Dooray로 일괄 전송"}
+          </button>
+          <button onClick={() => { setSelectMode(false); setSelected(new Set()); }}
+            className="text-xs text-teal-600 underline">취소</button>
+        </div>
+      )}
+      {bulkMsg && (
+        <div className="flex items-center gap-2 rounded-xl bg-teal-50 px-4 py-2.5 text-sm text-teal-800">
+          <span className="min-w-0 flex-1">{bulkMsg}</span>
+          <button onClick={() => setBulkMsg(null)} title="닫기" className="text-teal-500 hover:text-teal-700">✕</button>
+        </div>
+      )}
 
       {meetings === null ? (
         <p className="py-16 text-center text-sm text-slate-400">불러오는 중…</p>
@@ -2502,10 +2568,15 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, onCancelTr
             </thead>
             <tbody>
               {meetings.map((m) => (
-                <tr key={m.id} onClick={() => onOpen(m.id)}
-                  className="cursor-pointer border-b border-slate-100 last:border-0 hover:bg-teal-50/40">
+                <tr key={m.id} onClick={() => openOrSelect(m.id)}
+                  className={`cursor-pointer border-b border-slate-100 last:border-0 hover:bg-teal-50/40 ${
+                    selectMode && selected.has(m.id) ? "bg-teal-50" : ""
+                  }`}>
                   <td className="max-w-0 px-4 py-2" style={{ width: "45%" }}>
-                    <p className="truncate font-medium text-slate-800">{m.title}</p>
+                    <p className="truncate font-medium text-slate-800">
+                      {selectMode && <span className="mr-1.5">{selected.has(m.id) ? "☑" : "☐"}</span>}
+                      {m.title}
+                    </p>
                     {m.summary?.[0] && <p className="truncate text-xs text-slate-400">{m.summary[0]}</p>}
                   </td>
                   <td className="whitespace-nowrap px-4 py-2 text-xs text-slate-500">{fmtDate(m.created_at, m.tz)}</td>
@@ -2535,11 +2606,16 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, onCancelTr
           {meetings.map((m) => (
             <li key={m.id}>
               <button
-                onClick={() => onOpen(m.id)}
-                className="w-full rounded-2xl border border-slate-200 bg-white p-5 text-left shadow-sm transition hover:border-teal-400 hover:shadow-md"
+                onClick={() => openOrSelect(m.id)}
+                className={`w-full rounded-2xl border bg-white p-5 text-left shadow-sm transition hover:border-teal-400 hover:shadow-md ${
+                  selectMode && selected.has(m.id) ? "border-teal-500 ring-2 ring-teal-200" : "border-slate-200"
+                }`}
               >
                 <div className="flex items-start justify-between gap-2">
-                  <h3 className="font-semibold text-slate-800">{m.title}</h3>
+                  <h3 className="font-semibold text-slate-800">
+                    {selectMode && <span className="mr-1.5">{selected.has(m.id) ? "☑" : "☐"}</span>}
+                    {m.title}
+                  </h3>
                   <time className="shrink-0 text-xs text-slate-400">{fmtDate(m.created_at, m.tz)}</time>
                 </div>
                 <p className="mt-2 line-clamp-2 text-sm text-slate-500">{m.summary?.[0]}</p>
@@ -4317,6 +4393,7 @@ export default function App() {
             projectFilter={projectFilter}
             setProjectFilter={setProjectFilter}
             onManageProjects={() => setShowProjects(true)}
+            me={me}
             draftPreview={
               draft.title.trim() || draft.text.trim()
                 ? [draft.title.trim(), draft.text.trim()].filter(Boolean).join(" — ").slice(0, 80)

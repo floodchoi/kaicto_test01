@@ -86,7 +86,9 @@ ALTER TABLE meetings
   ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS updated_by INT REFERENCES users(id),
   ADD COLUMN IF NOT EXISTS project_id INT REFERENCES projects(id) ON DELETE SET NULL,
-  ADD COLUMN IF NOT EXISTS tz         TEXT; -- 작성자 시간대(IANA) — 날짜를 작성자 위치 기준으로 표시
+  ADD COLUMN IF NOT EXISTS tz         TEXT, -- 작성자 시간대(IANA) — 날짜를 작성자 위치 기준으로 표시
+  ADD COLUMN IF NOT EXISTS notion_synced_at TIMESTAMPTZ, -- Notion 전송 완료 시각 (일괄 전송 중복 방지)
+  ADD COLUMN IF NOT EXISTS dooray_synced_at TIMESTAMPTZ; -- Dooray 전송 완료 시각
 
 -- ============================================================
 -- [최초 1회만] 아래는 상황에 따라 선택 실행

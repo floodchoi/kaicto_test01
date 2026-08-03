@@ -72,7 +72,7 @@ export default wrap(async function handler(req, res) {
               dooray_token_enc, dooray_project_id,
               (SELECT 1 FROM activity_log WHERE false) AS _probe_log,
               (SELECT 1 FROM api_usage WHERE false) AS _probe_usage,
-              (SELECT tz FROM meetings WHERE false) AS _probe_tz`;
+              (SELECT notion_synced_at FROM meetings WHERE false) AS _probe_sync`;
   if (!me) return res.status(401).json({ error: "로그인이 필요합니다." });
 
   const ownKey = me.gemini_key_enc ? decryptSecret(me.gemini_key_enc) : null;

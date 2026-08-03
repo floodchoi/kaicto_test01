@@ -66,7 +66,16 @@ export default wrap(async function handler(req, res) {
       const [cfg] = await sql`
         SELECT notion_token_enc, notion_target_id, notion_target_type, dooray_token_enc, dooray_project_id
         FROM users WHERE id = ${userId}`;
-      const meetingData = { title, text, summary: summary ?? [], agenda: agenda ?? [], action_items: action_items ?? [], tags: tags ?? [] };
+      let projectName = null;
+      if (projectId) {
+        const [pj] = await sql`SELECT name FROM projects WHERE id = ${projectId}`;
+        projectName = pj?.name ?? null;
+      }
+      const meetingData = {
+        title, text,
+        summary: summary ?? [], agenda: agenda ?? [], action_items: action_items ?? [], tags: tags ?? [],
+        project: projectName, meetingId: meeting.id,
+      };
       if (wantNotion && cfg?.notion_token_enc && cfg?.notion_target_id) {
         try {
           const url = await pushToNotion(
@@ -74,6 +83,7 @@ export default wrap(async function handler(req, res) {
             meetingData,
           );
           integrations.notion = { ok: true, url };
+          await sql`UPDATE meetings SET notion_synced_at = now() WHERE id = ${meeting.id}`;
           await logAct(userId, "notion_sync", `#${meeting.id} ${title}${url ? ` → ${url}` : ""}`);
         } catch (e) {
           integrations.notion = { ok: false, error: e.message };
@@ -87,6 +97,7 @@ export default wrap(async function handler(req, res) {
             meetingData,
           );
           integrations.dooray = { ok: true, ...r };
+          await sql`UPDATE meetings SET dooray_synced_at = now() WHERE id = ${meeting.id}`;
           await logAct(userId, "dooray_sync", `#${meeting.id} 업무 ${r.created}건 등록${r.failed ? `, ${r.failed}건 실패` : ""}`);
         } catch (e) {
           integrations.dooray = { ok: false, error: e.message };

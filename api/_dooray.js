@@ -29,6 +29,8 @@ export async function pushTasksToDooray({ token, projectId }, meeting) {
   for (const a of items) {
     const content =
       `회의록: ${meeting.title}\n` +
+      (meeting.meetingId != null ? `회의록 ID: MM-${meeting.meetingId}\n` : "") +
+      (meeting.project ? `프로젝트: ${meeting.project}\n` : "") +
       (a.assignee ? `담당(회의 기준): ${a.assignee}\n` : "") +
       (a.due_date ? `기한(회의 기준): ${a.due_date}\n` : "") +
       `\n— Meeting Minutes에서 자동 등록`;
