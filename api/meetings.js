@@ -131,6 +131,7 @@ export default wrap(async function handler(req, res) {
   // 본인 것 + 전체 공개(workspace)만. ponytail: ILIKE 검색으로 충분, 커지면 FTS.
   const rows = await sql`
     SELECT m.id, m.title, m.summary, m.tags, m.created_at, m.visibility, m.tz,
+           m.notion_synced_at, m.dooray_synced_at,
            m.project_id, p.name AS project_name,
            (m.user_id = ${userId}) AS is_owner, u.email AS owner_email
     FROM meetings m

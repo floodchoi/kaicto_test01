@@ -2564,6 +2564,7 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, onCancelTr
                 <th className="px-4 py-3 font-semibold">프로젝트</th>
                 <th className="px-4 py-3 font-semibold">태그</th>
                 <th className="px-4 py-3 font-semibold">공개</th>
+                {canBulk && <th className="px-4 py-3 font-semibold" title="Notion/Dooray 전송 여부">연동</th>}
               </tr>
             </thead>
             <tbody>
@@ -2596,6 +2597,25 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, onCancelTr
                     title={m.visibility === "workspace" && !m.is_owner ? m.owner_email ?? "" : ""}>
                     {m.visibility === "workspace" ? "👥 공개" : "🔒 나만"}
                   </td>
+                  {/* 연동 전송 여부 — 📝 Notion · 📋 Dooray (시각은 툴팁) */}
+                  {canBulk && (
+                    <td className="whitespace-nowrap px-4 py-2 text-xs"
+                      title={
+                        [
+                          m.notion_synced_at && `Notion 전송: ${fmtDateTime(m.notion_synced_at)}`,
+                          m.dooray_synced_at && `Dooray 전송: ${fmtDateTime(m.dooray_synced_at)}`,
+                        ].filter(Boolean).join("\n") || "아직 전송되지 않음"
+                      }>
+                      {m.notion_synced_at || m.dooray_synced_at ? (
+                        <>
+                          {m.notion_synced_at ? "📝" : ""}
+                          {m.dooray_synced_at ? "📋" : ""}
+                        </>
+                      ) : (
+                        <span className="text-slate-300">—</span>
+                      )}
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
