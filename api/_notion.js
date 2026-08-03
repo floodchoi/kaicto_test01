@@ -8,9 +8,19 @@ const headers = (token) => ({
   "Content-Type": "application/json",
 });
 
-// Notion URL을 붙여넣어도 되게 마지막 32자리 hex ID를 추출 (하이픈 유무 무관)
-export const extractNotionId = (s) =>
-  String(s ?? "").replace(/-/g, "").match(/[0-9a-f]{32}/gi)?.pop() ?? String(s ?? "").trim();
+// Notion URL을 붙여넣어도 되게 32자리 hex ID를 추출 (하이픈 유무 무관).
+// ⚠️ 데이터베이스 URL은 "…/<DB ID>?v=<뷰 ID>" 형태 — 쿼리스트링(?v=…)의 뷰 ID를
+// 집지 않도록 경로에서 먼저 찾고, 경로에 없을 때만(?p=… 모달 URL) 쿼리에서 찾는다.
+export const extractNotionId = (s) => {
+  const str = String(s ?? "").trim();
+  const [path, query = ""] = str.split("?");
+  // 대시를 먼저 지우면 제목 슬러그의 hex 글자가 ID에 붙을 수 있어, 원문에서
+  // UUID(8-4-4-4-12) 또는 연속 32hex 패턴을 그대로 찾은 뒤 대시만 제거한다.
+  const find = (x) =>
+    x.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32}/i)?.[0]
+      ?.replace(/-/g, "");
+  return find(path) ?? find(query) ?? str;
+};
 
 const rt = (text) => [{ type: "text", text: { content: String(text).slice(0, 2000) } }];
 const heading = (t) => ({ object: "block", type: "heading_2", heading_2: { rich_text: rt(t) } });
@@ -49,24 +59,35 @@ export function buildBlocks({ summary, agenda, action_items, tags, text }) {
   return blocks.slice(0, 100);
 }
 
-// 연결 테스트: 대상(DB/페이지)에 접근 가능한지 확인, 제목 반환
+// 연결 테스트: 대상(DB/페이지)에 접근 가능한지 확인, 제목 반환.
+// 못 찾으면 반대 유형으로도 조회해 "유형이 잘못됐다"까지 짚어준다.
 export async function testNotion({ token, targetId, targetType }) {
   const id = extractNotionId(targetId);
-  const url =
-    targetType === "page" ? `${BASE}/v1/pages/${id}` : `${BASE}/v1/databases/${id}`;
-  const res = await fetch(url, { headers: headers(token) });
-  if (!res.ok) {
-    const msg = (await res.json().catch(() => ({}))).message ?? `HTTP ${res.status}`;
-    throw new Error(
-      `Notion 접근 실패: ${msg} — 토큰·대상 ID를 확인하고, Notion에서 해당 페이지/DB를 통합(integration)에 공유했는지 확인하세요.`,
-    );
-  }
-  const data = await res.json();
-  const title =
-    targetType === "page"
+  const get = (kind) =>
+    fetch(`${BASE}/v1/${kind === "page" ? "pages" : "databases"}/${id}`, { headers: headers(token) });
+
+  const res = await get(targetType === "page" ? "page" : "database");
+  if (res.ok) {
+    const data = await res.json();
+    return targetType === "page"
       ? "페이지 확인됨"
       : (data.title?.map((t) => t.plain_text).join("") || "제목 없는 데이터베이스");
-  return title;
+  }
+
+  // 진단: 같은 ID가 반대 유형으로는 조회되는가? (페이지 URL을 DB로 등록한 흔한 실수)
+  const other = await get(targetType === "page" ? "database" : "page").catch(() => null);
+  if (other?.ok) {
+    throw new Error(
+      targetType === "page"
+        ? "입력한 ID는 페이지가 아니라 데이터베이스입니다 — 설정에서 유형을 '데이터베이스에 행 추가'로 바꿔주세요."
+        : "입력한 ID는 데이터베이스가 아니라 일반 페이지입니다 — 데이터베이스를 '전체 페이지로 열기'한 뒤 그 URL을 붙여넣거나, 유형을 '페이지 아래 하위 페이지'로 바꿔주세요.",
+    );
+  }
+
+  const msg = (await res.json().catch(() => ({}))).message ?? `HTTP ${res.status}`;
+  throw new Error(
+    `Notion 접근 실패: ${msg} — ① Notion에서 대상(또는 그 상위 페이지)을 열고 ⋯ → 연결에 이 통합을 추가했는지, ② 데이터베이스라면 '전체 페이지로 열기' 상태의 URL을 넣었는지 확인하세요.`,
+  );
 }
 
 // 회의록을 Notion에 저장 — DB면 행 추가(제목/태그/날짜 속성 자동 매핑), 페이지면 하위 페이지 생성
