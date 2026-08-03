@@ -1,6 +1,7 @@
 import { sql } from "../_db.js";
 import { wrap } from "../_wrap.js";
-import { requireAuth, encryptText, decryptText } from "../_auth.js";
+import { requireAuth, encryptText, decryptText, decryptSecret } from "../_auth.js";
+import { pushToNotion, archiveNotionPage } from "../_notion.js";
 import { resolveProjectId, seeCond, editCond } from "../meetings.js";
 import { logAct } from "../_log.js";
 
@@ -66,7 +67,37 @@ export default wrap(async function handler(req, res) {
     const [proj] = projectId
       ? await sql`SELECT name FROM projects WHERE id = ${projectId}`
       : [null];
+
+    // 이미 Notion에 전송된 회의록이면 수정 내용을 반영해 기존 페이지를 교체(업데이트).
+    // 어떤 오류도 회의록 수정 자체를 실패시키지 않는다.
+    const integrations = {};
+    try {
+      if (meeting.notion_page_id || meeting.notion_synced_at) {
+        const [cfg] = await sql`
+          SELECT notion_token_enc, notion_target_id, notion_target_type FROM users WHERE id = ${userId}`;
+        if (cfg?.notion_token_enc && cfg?.notion_target_id) {
+          const token = decryptSecret(cfg.notion_token_enc);
+          if (meeting.notion_page_id) await archiveNotionPage(token, meeting.notion_page_id);
+          const { url, pageId } = await pushToNotion(
+            { token, targetId: cfg.notion_target_id, targetType: cfg.notion_target_type ?? "database" },
+            {
+              title, text,
+              summary: summary ?? [], agenda: agenda ?? [], action_items: items, tags: tags ?? [],
+              project: proj?.name ?? null, meetingId: id, createdAt: meeting.created_at,
+            },
+          );
+          await sql`UPDATE meetings SET notion_synced_at = now(), notion_page_id = ${pageId} WHERE id = ${id}`;
+          integrations.notion = { ok: true, url, updated: true };
+          await logAct(userId, "notion_sync", `#${id} ${title} (수정 반영 — 교체)${url ? ` → ${url}` : ""}`);
+        }
+      }
+    } catch (e) {
+      integrations.notion = { ok: false, error: e.message };
+      await logAct(userId, "notion_error", `#${id} (수정 반영) ${e.message}`);
+    }
+
     return res.status(200).json({
+      integrations,
       ...meeting,
       action_items: items,
       is_owner: meeting.user_id === userId,

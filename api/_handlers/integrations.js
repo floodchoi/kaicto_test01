@@ -1,7 +1,7 @@
 import { sql } from "../_db.js";
 import { wrap } from "../_wrap.js";
 import { requireAuth, decryptSecret, decryptText } from "../_auth.js";
-import { testNotion, pushToNotion } from "../_notion.js";
+import { testNotion, pushToNotion, archiveNotionPage } from "../_notion.js";
 import { testDooray, pushTasksToDooray, pushWikiToDooray } from "../_dooray.js";
 import { editCond } from "../meetings.js";
 import { logAct } from "../_log.js";
@@ -66,13 +66,16 @@ export default wrap(async function handler(req, res) {
       if (skipSynced && m.notion_synced_at) out.notion = { skipped: true };
       else {
         try {
-          const url = await pushToNotion(
-            { token: decryptSecret(u.notion_token_enc), targetId: u.notion_target_id, targetType: u.notion_target_type ?? "database" },
+          const token = decryptSecret(u.notion_token_enc);
+          // 이미 전송된 페이지가 있으면 보관 처리 후 새로 생성 = 중복 없이 교체(업데이트)
+          if (m.notion_page_id) await archiveNotionPage(token, m.notion_page_id);
+          const { url, pageId } = await pushToNotion(
+            { token, targetId: u.notion_target_id, targetType: u.notion_target_type ?? "database" },
             data,
           );
-          out.notion = { ok: true, url };
-          await sql`UPDATE meetings SET notion_synced_at = now() WHERE id = ${m.id}`;
-          await logAct(userId, "notion_sync", `#${m.id} ${m.title}${label}${url ? ` → ${url}` : ""}`);
+          out.notion = { ok: true, url, updated: !!m.notion_page_id };
+          await sql`UPDATE meetings SET notion_synced_at = now(), notion_page_id = ${pageId} WHERE id = ${m.id}`;
+          await logAct(userId, "notion_sync", `#${m.id} ${m.title}${label}${m.notion_page_id ? " (교체)" : ""}${url ? ` → ${url}` : ""}`);
         } catch (e) {
           out.notion = { ok: false, error: e.message };
           await logAct(userId, "notion_error", `#${m.id}${label} ${e.message}`);

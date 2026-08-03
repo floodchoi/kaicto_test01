@@ -80,12 +80,12 @@ export default wrap(async function handler(req, res) {
       };
       if (wantNotion && cfg?.notion_token_enc && cfg?.notion_target_id) {
         try {
-          const url = await pushToNotion(
+          const { url, pageId } = await pushToNotion(
             { token: decryptSecret(cfg.notion_token_enc), targetId: cfg.notion_target_id, targetType: cfg.notion_target_type ?? "database" },
             meetingData,
           );
           integrations.notion = { ok: true, url };
-          await sql`UPDATE meetings SET notion_synced_at = now() WHERE id = ${meeting.id}`;
+          await sql`UPDATE meetings SET notion_synced_at = now(), notion_page_id = ${pageId} WHERE id = ${meeting.id}`;
           await logAct(userId, "notion_sync", `#${meeting.id} ${title}${url ? ` → ${url}` : ""}`);
         } catch (e) {
           integrations.notion = { ok: false, error: e.message };

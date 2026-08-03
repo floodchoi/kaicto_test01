@@ -3491,7 +3491,7 @@ function Detail({ id, onBack, projects, me }) {
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState(null);
   const resync = async () => {
-    if (!confirm("이 회의록을 Notion/Dooray로 지금 전송할까요?\n(이미 전송된 적이 있다면 새 페이지/업무가 중복 생성될 수 있습니다)")) return;
+    if (!confirm("이 회의록을 Notion/Dooray로 지금 전송할까요?\n(Notion은 기존 페이지가 있으면 최신 내용으로 교체되고, Dooray는 위키/업무가 새로 추가될 수 있습니다)")) return;
     setSyncing(true);
     setSyncMsg(null);
     try {
@@ -3531,7 +3531,17 @@ function Detail({ id, onBack, projects, me }) {
       <EditMeeting
         m={m}
         projects={projects}
-        onSaved={(updated) => { setM(updated); setEditing(false); }}
+        onSaved={(updated) => {
+          setM(updated);
+          setEditing(false);
+          const n = updated.integrations?.notion;
+          if (n)
+            setSyncMsg(
+              n.ok
+                ? { text: "📝 수정 내용이 Notion 페이지에 반영(교체)되었습니다.", url: n.url }
+                : { text: "⚠️ Notion 반영 실패: " + n.error, url: null },
+            );
+        }}
         onCancel={() => setEditing(false)}
       />
     );

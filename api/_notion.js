@@ -122,12 +122,20 @@ export async function pushToNotion({ token, targetId, targetType }, meeting) {
       properties[tagProp] = {
         multi_select: meeting.tags.slice(0, 10).map((t) => ({ name: String(t).slice(0, 90) })),
       };
-    const dateProp = findProp("date");
-    if (dateProp)
-      properties[dateProp] = {
-        // Notion 페이지 생성 시각이 아니라 회의록 생성일을 기록 (소급 전송해도 원래 날짜 유지)
+    // 날짜 속성 분리 매핑: '날짜/회의' 이름의 date 속성 ← 회의록 생성일,
+    // '생성일/업로드/created' 이름의 date 속성 ← 전송(업로드) 시점. 하나뿐이면 회의록 생성일.
+    const dateKeys = Object.keys(props).filter((k) => props[k].type === "date");
+    const uploadDateProp = dateKeys.find((k) => /생성일|업로드|created/i.test(k));
+    const meetingDateProp =
+      dateKeys.find((k) => /날짜|회의|meeting|date/i.test(k) && k !== uploadDateProp) ??
+      dateKeys.find((k) => k !== uploadDateProp);
+    if (meetingDateProp)
+      properties[meetingDateProp] = {
+        // Notion 페이지 생성 시각이 아니라 회의록 생성일 (소급 전송해도 원래 날짜 유지)
         date: { start: meeting.createdAt ? new Date(meeting.createdAt).toISOString() : new Date().toISOString() },
       };
+    if (uploadDateProp)
+      properties[uploadDateProp] = { date: { start: new Date().toISOString() } };
     // 프로젝트 이름: '프로젝트'/'Project' 이름의 속성 우선, 없으면 첫 select 속성에 매핑
     if (meeting.project) {
       const byName = Object.keys(props).find((k) => /^(프로젝트|project)$/i.test(k.trim()));
@@ -136,9 +144,9 @@ export async function pushToNotion({ token, targetId, targetType }, meeting) {
       if (t === "select") properties[key] = { select: { name: String(meeting.project).slice(0, 90) } };
       else if (t === "rich_text") properties[key] = { rich_text: rt(meeting.project) };
     }
-    // 회의록 ID: '회의록 ID'/'Meeting ID' 이름의 속성이 있으면 채움 (없으면 본문에만 기록)
+    // 회의록 ID: '회의록 ID'/'Meeting ID'/'ID' 이름의 속성이 있으면 채움 (없으면 본문에만 기록)
     if (meeting.meetingId != null) {
-      const key = Object.keys(props).find((k) => /회의록\s*id|meeting\s*id/i.test(k));
+      const key = Object.keys(props).find((k) => /회의록\s*id|meeting\s*id|^id$/i.test(k.trim()));
       const t = key && props[key].type;
       if (t === "number") properties[key] = { number: Number(meeting.meetingId) };
       else if (t === "rich_text") properties[key] = { rich_text: rt("MM-" + meeting.meetingId) };
@@ -154,5 +162,20 @@ export async function pushToNotion({ token, targetId, targetType }, meeting) {
     const msg = (await res.json().catch(() => ({}))).message ?? `HTTP ${res.status}`;
     throw new Error(msg);
   }
-  return (await res.json()).url ?? null;
+  const created = await res.json();
+  return { url: created.url ?? null, pageId: created.id ?? null };
+}
+
+// 기존 페이지 보관(휴지통) 처리 — 수정 재전송 시 중복 대신 교체하기 위해 사용.
+// 실패해도(이미 삭제됨 등) 새 페이지 생성은 계속한다.
+export async function archiveNotionPage(token, pageId) {
+  try {
+    await fetch(`${BASE}/v1/pages/${pageId}`, {
+      method: "PATCH",
+      headers: headers(token),
+      body: JSON.stringify({ archived: true }),
+    });
+  } catch {
+    /* 무시 */
+  }
 }

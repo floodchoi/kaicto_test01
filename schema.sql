@@ -87,6 +87,7 @@ CREATE TABLE meetings (
   updated_by INT REFERENCES users(id),           -- 최종 수정 계정
   tz         TEXT,                               -- 작성자 시간대(IANA) — 날짜를 작성자 위치 기준으로 표시
   notion_synced_at TIMESTAMPTZ,                  -- Notion 전송 완료 시각 (일괄 전송 중복 방지)
+  notion_page_id   TEXT,                         -- 전송된 Notion 페이지 — 수정 시 교체(업데이트)용
   dooray_synced_at TIMESTAMPTZ                   -- Dooray 전송 완료 시각
 );
 

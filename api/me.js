@@ -72,7 +72,7 @@ export default wrap(async function handler(req, res) {
               dooray_token_enc, dooray_project_id,
               (SELECT 1 FROM activity_log WHERE false) AS _probe_log,
               (SELECT 1 FROM api_usage WHERE false) AS _probe_usage,
-              (SELECT notion_synced_at FROM meetings WHERE false) AS _probe_sync,
+              (SELECT notion_page_id FROM meetings WHERE false) AS _probe_sync,
               (SELECT dooray_project_id FROM projects WHERE false) AS _probe_pjdooray`;
   if (!me) return res.status(401).json({ error: "로그인이 필요합니다." });
 
