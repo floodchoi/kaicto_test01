@@ -15,9 +15,19 @@ export default wrap(async function handler(req, res) {
   if (!userId) return;
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
 
-  const [u] = await sql`
-    SELECT notion_token_enc, notion_target_id, notion_target_type, dooray_token_enc, dooray_project_id
-    FROM users WHERE id = ${userId}`;
+  let u;
+  try {
+    [u] = await sql`
+      SELECT notion_token_enc, notion_target_id, notion_target_type, dooray_token_enc, dooray_project_id
+      FROM users WHERE id = ${userId}`;
+  } catch (e) {
+    // 연동 컬럼이 없는 DB = 마이그레이션 미실행 — 원인을 짚어서 안내
+    if (/does not exist/i.test(e.message))
+      return res.status(400).json({
+        error: "DB 마이그레이션이 필요합니다 — 화면 상단 배너의 [🔧 마이그레이션 실행 (관리자)] 버튼을 누른 뒤 다시 시도해주세요.",
+      });
+    throw e;
+  }
 
   const action = req.body?.action;
 
@@ -74,21 +84,30 @@ export default wrap(async function handler(req, res) {
   if (action === "notion_test") {
     if (!u?.notion_token_enc || !u?.notion_target_id)
       return res.status(400).json({ error: "먼저 Notion 토큰과 대상(페이지/DB)을 저장해주세요." });
-    const title = await testNotion({
-      token: decryptSecret(u.notion_token_enc),
-      targetId: u.notion_target_id,
-      targetType: u.notion_target_type ?? "database",
-    });
-    return res.status(200).json({ ok: true, title });
+    try {
+      const title = await testNotion({
+        token: decryptSecret(u.notion_token_enc),
+        targetId: u.notion_target_id,
+        targetType: u.notion_target_type ?? "database",
+      });
+      return res.status(200).json({ ok: true, title });
+    } catch (e) {
+      // 접근 실패는 서버 장애(500)가 아니라 설정 문제 — 원인을 그대로 안내
+      return res.status(400).json({ error: e.message });
+    }
   }
   if (action === "dooray_test") {
     if (!u?.dooray_token_enc || !u?.dooray_project_id)
       return res.status(400).json({ error: "먼저 Dooray 토큰과 프로젝트 ID를 저장해주세요." });
-    const name = await testDooray({
-      token: decryptSecret(u.dooray_token_enc),
-      projectId: u.dooray_project_id,
-    });
-    return res.status(200).json({ ok: true, title: String(name) });
+    try {
+      const name = await testDooray({
+        token: decryptSecret(u.dooray_token_enc),
+        projectId: u.dooray_project_id,
+      });
+      return res.status(200).json({ ok: true, title: String(name) });
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
   }
   res.status(400).json({ error: "action은 notion_test 또는 dooray_test여야 합니다." });
 });
