@@ -53,11 +53,18 @@ export function buildBlocks({ summary, agenda, action_items, tags, text, project
   if (project) blocks.push(para("프로젝트: " + project));
   if (tags?.length) blocks.push(para("태그: " + tags.join(", ")));
   if (meetingId != null) blocks.push(para("회의록 ID: MM-" + meetingId));
-  blocks.push(heading("회의 원문"));
+  // 회의 원문은 토글 블록 안에 접어서 저장 — 페이지가 깔끔하고 필요할 때만 펼쳐 봄
   const t = String(text ?? "");
+  const paras = [];
   let written = 0;
-  for (; written < t.length && blocks.length < 98; written += 2000) blocks.push(para(t.slice(written, written + 2000)));
-  if (written < t.length) blocks.push(para("… (원문이 길어 일부 생략 — 웹앱에서 전체를 볼 수 있습니다)"));
+  for (; written < t.length && paras.length < 90; written += 2000) paras.push(para(t.slice(written, written + 2000)));
+  if (written < t.length) paras.push(para("… (원문이 길어 일부 생략 — 웹앱에서 전체를 볼 수 있습니다)"));
+  if (paras.length)
+    blocks.push({
+      object: "block",
+      type: "toggle",
+      toggle: { rich_text: rt("📄 회의 원문 (펼쳐 보기)"), children: paras },
+    });
   return blocks.slice(0, 100);
 }
 
@@ -116,7 +123,11 @@ export async function pushToNotion({ token, targetId, targetType }, meeting) {
         multi_select: meeting.tags.slice(0, 10).map((t) => ({ name: String(t).slice(0, 90) })),
       };
     const dateProp = findProp("date");
-    if (dateProp) properties[dateProp] = { date: { start: new Date().toISOString() } };
+    if (dateProp)
+      properties[dateProp] = {
+        // Notion 페이지 생성 시각이 아니라 회의록 생성일을 기록 (소급 전송해도 원래 날짜 유지)
+        date: { start: meeting.createdAt ? new Date(meeting.createdAt).toISOString() : new Date().toISOString() },
+      };
     // 프로젝트 이름: '프로젝트'/'Project' 이름의 속성 우선, 없으면 첫 select 속성에 매핑
     if (meeting.project) {
       const byName = Object.keys(props).find((k) => /^(프로젝트|project)$/i.test(k.trim()));

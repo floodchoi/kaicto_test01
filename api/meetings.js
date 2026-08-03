@@ -3,7 +3,7 @@ import { wrap } from "./_wrap.js";
 import { requireAuth, encryptText, decryptSecret } from "./_auth.js";
 import { logAct } from "./_log.js";
 import { pushToNotion } from "./_notion.js";
-import { pushTasksToDooray } from "./_dooray.js";
+import { pushTasksToDooray, pushWikiToDooray } from "./_dooray.js";
 
 const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
 
@@ -67,14 +67,16 @@ export default wrap(async function handler(req, res) {
         SELECT notion_token_enc, notion_target_id, notion_target_type, dooray_token_enc, dooray_project_id
         FROM users WHERE id = ${userId}`;
       let projectName = null;
+      let projectDoorayId = null;
       if (projectId) {
-        const [pj] = await sql`SELECT name FROM projects WHERE id = ${projectId}`;
+        const [pj] = await sql`SELECT name, dooray_project_id FROM projects WHERE id = ${projectId}`;
         projectName = pj?.name ?? null;
+        projectDoorayId = pj?.dooray_project_id ?? null;
       }
       const meetingData = {
         title, text,
         summary: summary ?? [], agenda: agenda ?? [], action_items: action_items ?? [], tags: tags ?? [],
-        project: projectName, meetingId: meeting.id,
+        project: projectName, meetingId: meeting.id, createdAt: meeting.created_at,
       };
       if (wantNotion && cfg?.notion_token_enc && cfg?.notion_target_id) {
         try {
@@ -90,15 +92,17 @@ export default wrap(async function handler(req, res) {
           await logAct(userId, "notion_error", `#${meeting.id} ${e.message}`);
         }
       }
-      if (wantDooray && cfg?.dooray_token_enc && cfg?.dooray_project_id && meetingData.action_items.length) {
+      // Dooray 대상: 회의록 프로젝트에 매핑된 Dooray 프로젝트 우선, 없으면 설정의 기본값
+      const doorayPid = projectDoorayId || cfg?.dooray_project_id;
+      if (wantDooray && cfg?.dooray_token_enc && doorayPid) {
         try {
-          const r = await pushTasksToDooray(
-            { token: decryptSecret(cfg.dooray_token_enc), projectId: cfg.dooray_project_id },
-            meetingData,
-          );
-          integrations.dooray = { ok: true, ...r };
+          const dcfg = { token: decryptSecret(cfg.dooray_token_enc), projectId: doorayPid };
+          await pushWikiToDooray(dcfg, meetingData); // 회의록 본문 → 프로젝트 위키
+          let r = { created: 0, failed: 0 };
+          if (meetingData.action_items.length) r = await pushTasksToDooray(dcfg, meetingData); // 액션 아이템 → 업무
+          integrations.dooray = { ok: true, wiki: true, ...r };
           await sql`UPDATE meetings SET dooray_synced_at = now() WHERE id = ${meeting.id}`;
-          await logAct(userId, "dooray_sync", `#${meeting.id} 업무 ${r.created}건 등록${r.failed ? `, ${r.failed}건 실패` : ""}`);
+          await logAct(userId, "dooray_sync", `#${meeting.id} 위키 저장 + 업무 ${r.created}건 (프로젝트 ${doorayPid})`);
         } catch (e) {
           integrations.dooray = { ok: false, error: e.message };
           await logAct(userId, "dooray_error", `#${meeting.id} ${e.message}`);

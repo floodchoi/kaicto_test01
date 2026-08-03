@@ -2,7 +2,7 @@ import { sql } from "../_db.js";
 import { wrap } from "../_wrap.js";
 import { requireAuth, decryptSecret, decryptText } from "../_auth.js";
 import { testNotion, pushToNotion } from "../_notion.js";
-import { testDooray, pushTasksToDooray } from "../_dooray.js";
+import { testDooray, pushTasksToDooray, pushWikiToDooray } from "../_dooray.js";
 import { editCond } from "../meetings.js";
 import { logAct } from "../_log.js";
 
@@ -31,12 +31,12 @@ export default wrap(async function handler(req, res) {
 
   const action = req.body?.action;
   const hasNotion = !!(u?.notion_token_enc && u?.notion_target_id);
-  const hasDooray = !!(u?.dooray_token_enc && u?.dooray_project_id);
+  const hasDooray = !!u?.dooray_token_enc; // 대상 프로젝트는 회의록별 매핑 또는 기본값에서 결정
 
   // 회의록 1건 로드(권한 검사 포함) + 전송용 데이터 구성. 없으면 null.
   const loadMeeting = async (meetingId) => {
     const [m] = await sql`
-      SELECT m.*, p.name AS project_name FROM meetings m
+      SELECT m.*, p.name AS project_name, p.dooray_project_id AS project_dooray_id FROM meetings m
       LEFT JOIN projects p ON p.id = m.project_id
       WHERE m.id = ${meetingId} AND ${editCond(userId)}`;
     if (!m) return null;
@@ -44,6 +44,7 @@ export default wrap(async function handler(req, res) {
       SELECT task, assignee, due_date, done FROM action_items WHERE meeting_id = ${meetingId} ORDER BY id`;
     return {
       m,
+      doorayPid: m.project_dooray_id || u?.dooray_project_id || null,
       data: {
         title: m.title,
         text: decryptText(m.raw_text),
@@ -53,12 +54,13 @@ export default wrap(async function handler(req, res) {
         tags: m.tags ?? [],
         project: m.project_name ?? null,
         meetingId: m.id,
+        createdAt: m.created_at,
       },
     };
   };
 
   // 한 회의록을 Notion/Dooray로 전송 (성공 시 synced_at 기록). skipSynced=true면 이미 전송분 건너뜀.
-  const sendOne = async ({ m, data }, skipSynced, label = "") => {
+  const sendOne = async ({ m, data, doorayPid }, skipSynced, label = "") => {
     const out = {};
     if (hasNotion) {
       if (skipSynced && m.notion_synced_at) out.notion = { skipped: true };
@@ -77,17 +79,17 @@ export default wrap(async function handler(req, res) {
         }
       }
     }
-    if (hasDooray && data.action_items.length) {
+    if (hasDooray && doorayPid) {
       if (skipSynced && m.dooray_synced_at) out.dooray = { skipped: true };
       else {
         try {
-          const r = await pushTasksToDooray(
-            { token: decryptSecret(u.dooray_token_enc), projectId: u.dooray_project_id },
-            data,
-          );
-          out.dooray = { ok: true, ...r };
+          const dcfg = { token: decryptSecret(u.dooray_token_enc), projectId: doorayPid };
+          await pushWikiToDooray(dcfg, data); // 회의록 본문 → 프로젝트 위키
+          let r = { created: 0, failed: 0 };
+          if (data.action_items.length) r = await pushTasksToDooray(dcfg, data);
+          out.dooray = { ok: true, wiki: true, ...r };
           await sql`UPDATE meetings SET dooray_synced_at = now() WHERE id = ${m.id}`;
-          await logAct(userId, "dooray_sync", `#${m.id} 업무 ${r.created}건 등록${label}`);
+          await logAct(userId, "dooray_sync", `#${m.id} 위키 저장 + 업무 ${r.created}건${label} (프로젝트 ${doorayPid})`);
         } catch (e) {
           out.dooray = { ok: false, error: e.message };
           await logAct(userId, "dooray_error", `#${m.id}${label} ${e.message}`);

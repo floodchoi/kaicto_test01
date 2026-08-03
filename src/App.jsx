@@ -1593,7 +1593,9 @@ function Settings({ settings, me, onSave, onClose }) {
 
           <h4 className="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-400">Dooray</h4>
           <p className="mt-1 text-xs text-slate-500">
-            저장 시 액션 아이템이 지정한 Dooray 프로젝트의 업무로 등록됩니다 (아이템당 1건, 최대 20건).
+            저장 시 회의록 본문은 Dooray 프로젝트의 <b>위키</b>에, 액션 아이템은 <b>업무</b>로 등록됩니다
+            (아이템당 1건, 최대 20건). 아래 프로젝트 ID는 <b>기본값</b>이며, 📁 프로젝트 관리에서
+            프로젝트별로 다른 Dooray 프로젝트를 매핑하면 그 값이 우선합니다.
           </p>
           <input type="password" value={doorayToken} onChange={(e) => setDoorayToken(e.target.value)}
             placeholder={me?.has_dooray_token ? "저장됨 — 변경할 때만 입력" : "Dooray API 토큰"}
@@ -1705,11 +1707,27 @@ function ProjectSelect({ projects, value, onChange, mode = "filter", className =
 }
 
 /* ── 프로젝트 관리 모달 ─────────────────────────────────────── */
-/* 프로젝트 멤버 관리: 이메일 검색 → 선택해 지정. 멤버는 프로젝트의 모든 회의록을 열람·수정 */
+/* 프로젝트 멤버 관리 + Dooray 프로젝트 매핑. 멤버는 프로젝트의 모든 회의록을 열람·수정 */
 function ProjectMembers({ p, onChanged }) {
   const [q, setQ] = useState("");
   const [results, setResults] = useState([]);
   const [error, setError] = useState(null);
+  // 이 프로젝트의 회의록을 보낼 Dooray 프로젝트 (비우면 설정의 기본값 사용)
+  const [dooray, setDooray] = useState(p.dooray_project_id ?? "");
+  const [doorayMsg, setDoorayMsg] = useState("");
+  const saveDooray = async () => {
+    setDoorayMsg("");
+    try {
+      await api("/api/projects", {
+        method: "PATCH",
+        body: JSON.stringify({ projectId: p.id, doorayProjectId: dooray.trim() }),
+      });
+      setDoorayMsg("✅ 저장됨");
+      onChanged();
+    } catch (e) {
+      setDoorayMsg("⚠️ " + e.message);
+    }
+  };
   useEffect(() => {
     if (q.trim().length < 2) {
       setResults([]);
@@ -1769,6 +1787,24 @@ function ProjectMembers({ p, onChanged }) {
       )}
       <p className="mt-2 text-xs text-slate-400">멤버는 이 프로젝트의 모든 회의록을 보고 수정할 수 있습니다.</p>
       {error && <p className="mt-1 text-xs text-red-500">⚠️ {error}</p>}
+
+      {/* Dooray 프로젝트 매핑 — 이 프로젝트의 회의록이 저장될 Dooray 프로젝트 */}
+      <div className="mt-3 border-t border-slate-200 pt-3">
+        <label className="text-xs font-semibold text-slate-600">Dooray 프로젝트 연동</label>
+        <div className="mt-1.5 flex items-center gap-2">
+          <input value={dooray} onChange={(e) => setDooray(e.target.value)}
+            placeholder="Dooray 프로젝트 ID (비우면 설정의 기본값 사용)"
+            className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm outline-none focus:border-teal-500" />
+          <button onClick={saveDooray}
+            className="shrink-0 rounded-lg bg-teal-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-teal-600">
+            저장
+          </button>
+          {doorayMsg && <span className="shrink-0 text-xs text-slate-500">{doorayMsg}</span>}
+        </div>
+        <p className="mt-1 text-xs text-slate-400">
+          이 프로젝트의 회의록은 지정한 Dooray 프로젝트의 <b>위키에 본문</b>이, <b>업무에 액션 아이템</b>이 저장됩니다.
+        </p>
+      </div>
     </div>
   );
 }

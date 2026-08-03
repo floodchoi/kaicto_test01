@@ -36,6 +36,7 @@ CREATE TABLE projects (
   name       TEXT NOT NULL,
   owner_id   INT REFERENCES users(id) ON DELETE CASCADE, -- 개인 프로젝트 소유자
   is_shared  BOOLEAN NOT NULL DEFAULT false,             -- 관리자가 만든 공유 프로젝트 (전체 사용 가능)
+  dooray_project_id TEXT,                                -- 이 프로젝트의 회의록을 보낼 Dooray 프로젝트
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
