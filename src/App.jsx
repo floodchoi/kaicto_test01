@@ -2594,7 +2594,7 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, onCancelTr
         <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white shadow-sm">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-400">
+              <tr className="whitespace-nowrap border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-400">
                 <th className="px-4 py-3 font-semibold">제목</th>
                 <th className="px-4 py-3 font-semibold">날짜</th>
                 <th className="px-4 py-3 font-semibold">프로젝트</th>
@@ -2609,7 +2609,7 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, onCancelTr
                   className={`cursor-pointer border-b border-slate-100 last:border-0 hover:bg-teal-50/40 ${
                     selectMode && selected.has(m.id) ? "bg-teal-50" : ""
                   }`}>
-                  <td className="max-w-0 px-4 py-2" style={{ width: "45%" }}>
+                  <td className="max-w-0 px-4 py-2" style={{ width: "58%" }}>
                     <p className="truncate font-medium text-slate-800">
                       {selectMode && <span className="mr-1.5">{selected.has(m.id) ? "☑" : "☐"}</span>}
                       {m.title}
@@ -2620,12 +2620,12 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, onCancelTr
                   <td className="max-w-32 truncate whitespace-nowrap px-4 py-2 text-xs text-slate-500">
                     {m.project_name ? `📁 ${m.project_name}` : "—"}
                   </td>
-                  {/* 태그는 2개까지만 — 넘치면 +N (전체는 툴팁), 줄바꿈 없이 한 줄 유지 */}
-                  <td className="whitespace-nowrap px-4 py-2" title={m.tags?.join(", ")}>
+                  {/* 태그는 1개만 — 나머지는 +N (전체는 툴팁), 줄바꿈 없이 한 줄 유지 */}
+                  <td className="whitespace-nowrap px-2 py-2" title={m.tags?.join(", ")}>
                     <div className="flex items-center gap-1">
-                      {(m.tags ?? []).slice(0, 2).map((t) => <Tag key={t}>{t}</Tag>)}
-                      {(m.tags?.length ?? 0) > 2 && (
-                        <span className="text-xs text-slate-400">+{m.tags.length - 2}</span>
+                      {(m.tags ?? []).slice(0, 1).map((t) => <Tag key={t}>{t}</Tag>)}
+                      {(m.tags?.length ?? 0) > 1 && (
+                        <span className="text-xs text-slate-400">+{m.tags.length - 1}</span>
                       )}
                     </div>
                   </td>
