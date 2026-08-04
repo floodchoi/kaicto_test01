@@ -2,7 +2,7 @@ import { sql } from "./_db.js";
 import { wrap } from "./_wrap.js";
 import { requireAuth, encryptText, decryptSecret } from "./_auth.js";
 import { logAct } from "./_log.js";
-import { pushToNotion } from "./_notion.js";
+import { pushToNotion, extractNotionId } from "./_notion.js";
 import { pushTasksToDooray, pushWikiToDooray } from "./_dooray.js";
 
 const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
@@ -90,7 +90,10 @@ export default wrap(async function handler(req, res) {
             meetingData,
           );
           integrations.notion = { ok: true, url };
-          await sql`UPDATE meetings SET notion_synced_at = now(), notion_page_id = ${pageId} WHERE id = ${meeting.id}`;
+          await sql`
+            UPDATE meetings SET notion_synced_at = now(), notion_page_id = ${pageId},
+                   notion_target_sent = ${extractNotionId(notionTarget.id)}
+            WHERE id = ${meeting.id}`;
           await logAct(userId, "notion_sync", `#${meeting.id} ${title}${url ? ` → ${url}` : ""}`);
         } catch (e) {
           integrations.notion = { ok: false, error: e.message };
@@ -106,7 +109,9 @@ export default wrap(async function handler(req, res) {
           let r = { created: 0, failed: 0 };
           if (meetingData.action_items.length) r = await pushTasksToDooray(dcfg, meetingData); // 액션 아이템 → 업무
           integrations.dooray = { ok: true, wiki: true, ...r };
-          await sql`UPDATE meetings SET dooray_synced_at = now() WHERE id = ${meeting.id}`;
+          await sql`
+            UPDATE meetings SET dooray_synced_at = now(), dooray_target_sent = ${String(doorayPid)}
+            WHERE id = ${meeting.id}`;
           await logAct(userId, "dooray_sync", `#${meeting.id} 위키 저장 + 업무 ${r.created}건 (프로젝트 ${doorayPid})`);
         } catch (e) {
           integrations.dooray = { ok: false, error: e.message };

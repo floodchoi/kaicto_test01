@@ -1,7 +1,7 @@
 import { sql } from "../_db.js";
 import { wrap } from "../_wrap.js";
 import { requireAuth, decryptSecret, decryptText } from "../_auth.js";
-import { testNotion, testNotionToken, pushToNotion, archiveNotionPage } from "../_notion.js";
+import { testNotion, testNotionToken, pushToNotion, archiveNotionPage, extractNotionId } from "../_notion.js";
 import { testDooray, testDoorayToken, pushTasksToDooray, pushWikiToDooray } from "../_dooray.js";
 import { editCond } from "../meetings.js";
 import { logAct } from "../_log.js";
@@ -66,23 +66,31 @@ export default wrap(async function handler(req, res) {
     };
   };
 
-  // 한 회의록을 Notion/Dooray로 전송 (성공 시 synced_at 기록). skipSynced=true면 이미 전송분 건너뜀.
+  // 한 회의록을 Notion/Dooray로 전송 (성공 시 synced_at·전송 대상 기록).
+  // skipSynced=true(일괄)면 이미 전송분은 건너뛰되, 저장 대상이 바뀌었으면 새 대상으로 다시 보낸다.
   const sendOne = async ({ m, data, doorayPid, notionTarget }, skipSynced, label = "") => {
     const out = {};
     if (hasNotion && notionTarget) {
-      if (skipSynced && m.notion_synced_at) out.notion = { skipped: true };
+      const nowTarget = extractNotionId(notionTarget.id);
+      // 대상이 바뀐 경우: 옛 페이지는 다른 테이블에 있으므로 건드리지 않고 새 대상에 생성
+      const targetChanged = !!m.notion_target_sent && m.notion_target_sent !== nowTarget;
+      if (skipSynced && m.notion_synced_at && !targetChanged) out.notion = { skipped: true };
       else {
         try {
           const token = decryptSecret(u.notion_token_enc);
-          // 이미 전송된 페이지가 있으면 보관 처리 후 새로 생성 = 중복 없이 교체(업데이트)
-          if (m.notion_page_id) await archiveNotionPage(token, m.notion_page_id);
+          // 같은 대상에 다시 보낼 때만 기존 페이지를 보관 처리 = 중복 없이 교체(업데이트)
+          if (m.notion_page_id && !targetChanged) await archiveNotionPage(token, m.notion_page_id);
           const { url, pageId } = await pushToNotion(
             { token, targetId: notionTarget.id, targetType: notionTarget.type },
             data,
           );
-          out.notion = { ok: true, url, updated: !!m.notion_page_id };
-          await sql`UPDATE meetings SET notion_synced_at = now(), notion_page_id = ${pageId} WHERE id = ${m.id}`;
-          await logAct(userId, "notion_sync", `#${m.id} ${m.title}${label}${m.notion_page_id ? " (교체)" : ""}${url ? ` → ${url}` : ""}`);
+          out.notion = { ok: true, url, updated: !!m.notion_page_id && !targetChanged, movedTarget: targetChanged };
+          await sql`
+            UPDATE meetings SET notion_synced_at = now(), notion_page_id = ${pageId},
+                   notion_target_sent = ${nowTarget}
+            WHERE id = ${m.id}`;
+          await logAct(userId, "notion_sync",
+            `#${m.id} ${m.title}${label}${targetChanged ? " (대상 변경 — 새 테이블로 전송)" : m.notion_page_id ? " (교체)" : ""}${url ? ` → ${url}` : ""}`);
         } catch (e) {
           out.notion = { ok: false, error: e.message };
           await logAct(userId, "notion_error", `#${m.id}${label} ${e.message}`);
@@ -90,16 +98,20 @@ export default wrap(async function handler(req, res) {
       }
     }
     if (hasDooray && doorayPid) {
-      if (skipSynced && m.dooray_synced_at) out.dooray = { skipped: true };
+      const doorayChanged = !!m.dooray_target_sent && m.dooray_target_sent !== String(doorayPid);
+      if (skipSynced && m.dooray_synced_at && !doorayChanged) out.dooray = { skipped: true };
       else {
         try {
           const dcfg = { token: decryptSecret(u.dooray_token_enc), projectId: doorayPid };
           await pushWikiToDooray(dcfg, data); // 회의록 본문 → 프로젝트 위키
           let r = { created: 0, failed: 0 };
           if (data.action_items.length) r = await pushTasksToDooray(dcfg, data);
-          out.dooray = { ok: true, wiki: true, ...r };
-          await sql`UPDATE meetings SET dooray_synced_at = now() WHERE id = ${m.id}`;
-          await logAct(userId, "dooray_sync", `#${m.id} 위키 저장 + 업무 ${r.created}건${label} (프로젝트 ${doorayPid})`);
+          out.dooray = { ok: true, wiki: true, movedTarget: doorayChanged, ...r };
+          await sql`
+            UPDATE meetings SET dooray_synced_at = now(), dooray_target_sent = ${String(doorayPid)}
+            WHERE id = ${m.id}`;
+          await logAct(userId, "dooray_sync",
+            `#${m.id} 위키 저장 + 업무 ${r.created}건${label}${doorayChanged ? " (대상 변경)" : ""} (프로젝트 ${doorayPid})`);
         } catch (e) {
           out.dooray = { ok: false, error: e.message };
           await logAct(userId, "dooray_error", `#${m.id}${label} ${e.message}`);
@@ -125,7 +137,7 @@ export default wrap(async function handler(req, res) {
     const ids = [...new Set((req.body?.meetingIds ?? []).map(Number).filter((n) => Number.isInteger(n) && n > 0))].slice(0, 30);
     if (!ids.length) return res.status(400).json({ error: "전송할 회의록을 선택해주세요." });
 
-    const summary = { sent: 0, skipped: 0, failed: 0, missing: 0, errors: [] };
+    const summary = { sent: 0, moved: 0, skipped: 0, failed: 0, missing: 0, errors: [] };
     for (const id of ids) {
       const loaded = await loadMeeting(id);
       if (!loaded) {
@@ -134,6 +146,7 @@ export default wrap(async function handler(req, res) {
       }
       const out = await sendOne(loaded, true, " (일괄)");
       const parts = [out.notion, out.dooray].filter(Boolean);
+      if (parts.some((p) => p.ok && p.movedTarget)) summary.moved++; // 저장 위치 변경으로 재전송
       if (parts.some((p) => p.ok)) summary.sent++;
       else if (parts.length && parts.every((p) => p.skipped)) summary.skipped++;
       else if (parts.some((p) => p.error)) {

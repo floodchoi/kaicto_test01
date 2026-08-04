@@ -2776,7 +2776,9 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, onCancelTr
         body: JSON.stringify({ action: "bulk_sync", meetingIds: [...selected] }),
       });
       setBulkMsg(
-        `↗ 일괄 전송 완료 — 성공 ${r.sent}건 · 이미 전송돼 건너뜀 ${r.skipped}건 · 실패 ${r.failed}건` +
+        `↗ 일괄 전송 완료 — 성공 ${r.sent}건` +
+          (r.moved ? ` (저장 위치 변경으로 재전송 ${r.moved}건 포함)` : "") +
+          ` · 이미 전송돼 건너뜀 ${r.skipped}건 · 실패 ${r.failed}건` +
           (r.errors?.length ? ` (${r.errors[0]})` : ""),
       );
       setSelected(new Set());
@@ -3932,7 +3934,12 @@ function Detail({ id, onBack, projects, me, settings }) {
           if (n)
             setSyncMsg(
               n.ok
-                ? { text: "📝 수정 내용이 Notion 페이지에 반영(교체)되었습니다.", url: n.url }
+                ? {
+                    text: n.movedTarget
+                      ? "📝 저장 위치가 바뀌어 새 Notion 테이블에 다시 저장했습니다."
+                      : "📝 수정 내용이 Notion 페이지에 반영(교체)되었습니다.",
+                    url: n.url,
+                  }
                 : { text: "⚠️ Notion 반영 실패: " + n.error, url: null },
             );
         }}

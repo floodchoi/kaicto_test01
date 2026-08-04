@@ -93,6 +93,8 @@ ALTER TABLE meetings
   ADD COLUMN IF NOT EXISTS tz         TEXT, -- 작성자 시간대(IANA) — 날짜를 작성자 위치 기준으로 표시
   ADD COLUMN IF NOT EXISTS notion_synced_at TIMESTAMPTZ, -- Notion 전송 완료 시각 (일괄 전송 중복 방지)
   ADD COLUMN IF NOT EXISTS notion_page_id   TEXT,        -- 전송된 Notion 페이지 — 수정 시 교체(업데이트)용
+  ADD COLUMN IF NOT EXISTS notion_target_sent TEXT,      -- 마지막으로 전송한 Notion 대상(정규화 ID) — 대상 변경 감지용
+  ADD COLUMN IF NOT EXISTS dooray_target_sent TEXT,      -- 〃 Dooray 프로젝트 ID
   ADD COLUMN IF NOT EXISTS dooray_synced_at TIMESTAMPTZ; -- Dooray 전송 완료 시각
 
 -- ============================================================

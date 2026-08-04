@@ -1,7 +1,7 @@
 import { sql } from "../_db.js";
 import { wrap } from "../_wrap.js";
 import { requireAuth, encryptText, decryptText, decryptSecret } from "../_auth.js";
-import { pushToNotion, archiveNotionPage } from "../_notion.js";
+import { pushToNotion, archiveNotionPage, extractNotionId } from "../_notion.js";
 import { resolveProjectId, seeCond, editCond } from "../meetings.js";
 import { logAct } from "../_log.js";
 
@@ -75,20 +75,36 @@ export default wrap(async function handler(req, res) {
       if (meeting.notion_page_id || meeting.notion_synced_at) {
         const [cfg] = await sql`
           SELECT notion_token_enc, notion_target_id, notion_target_type FROM users WHERE id = ${userId}`;
-        if (cfg?.notion_token_enc && cfg?.notion_target_id) {
+        // 저장 위치: 회의록이 속한 프로젝트의 지정 테이블 우선, 없으면 설정 기본값
+        const [pjt] = projectId
+          ? await sql`SELECT notion_target_id, notion_target_type FROM projects WHERE id = ${projectId}`
+          : [null];
+        const target = pjt?.notion_target_id
+          ? { id: pjt.notion_target_id, type: pjt.notion_target_type ?? "database" }
+          : cfg?.notion_target_id
+            ? { id: cfg.notion_target_id, type: cfg.notion_target_type ?? "database" }
+            : null;
+        if (cfg?.notion_token_enc && target) {
           const token = decryptSecret(cfg.notion_token_enc);
-          if (meeting.notion_page_id) await archiveNotionPage(token, meeting.notion_page_id);
+          const nowTarget = extractNotionId(target.id);
+          // 대상이 바뀌었으면 옛 페이지(다른 테이블)는 그대로 두고 새 대상에 생성
+          const targetChanged = !!meeting.notion_target_sent && meeting.notion_target_sent !== nowTarget;
+          if (meeting.notion_page_id && !targetChanged) await archiveNotionPage(token, meeting.notion_page_id);
           const { url, pageId } = await pushToNotion(
-            { token, targetId: cfg.notion_target_id, targetType: cfg.notion_target_type ?? "database" },
+            { token, targetId: target.id, targetType: target.type },
             {
               title, text,
               summary: summary ?? [], agenda: agenda ?? [], action_items: items, tags: tags ?? [],
               project: proj?.name ?? null, meetingId: id, createdAt: meeting.created_at,
             },
           );
-          await sql`UPDATE meetings SET notion_synced_at = now(), notion_page_id = ${pageId} WHERE id = ${id}`;
-          integrations.notion = { ok: true, url, updated: true };
-          await logAct(userId, "notion_sync", `#${id} ${title} (수정 반영 — 교체)${url ? ` → ${url}` : ""}`);
+          await sql`
+            UPDATE meetings SET notion_synced_at = now(), notion_page_id = ${pageId},
+                   notion_target_sent = ${nowTarget}
+            WHERE id = ${id}`;
+          integrations.notion = { ok: true, url, updated: !targetChanged, movedTarget: targetChanged };
+          await logAct(userId, "notion_sync",
+            `#${id} ${title} (수정 반영 — ${targetChanged ? "대상 변경, 새 테이블로 전송" : "교체"})${url ? ` → ${url}` : ""}`);
         }
       }
     } catch (e) {
