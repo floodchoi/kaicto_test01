@@ -3492,11 +3492,100 @@ function EditMeeting({ m, projects, onSaved, onCancel }) {
 }
 
 /* ── 회의록 상세: 요약 / 아젠다 / 액션 아이템 ─────────────── */
-function Detail({ id, onBack, projects, me }) {
+function Detail({ id, onBack, projects, me, settings }) {
   const [m, setM] = useState(null);
   const [showRaw, setShowRaw] = useState(false);
   const [editing, setEditing] = useState(false);
   const [deleting, setDeleting] = useState(false);
+
+  // 🔁 재요약 — 저장된 원문으로 요약을 다시 생성해 미리보기 → 적용 시 덮어쓰기
+  const [resum, setResum] = useState({ status: "idle", log: [], elapsed: 0, preview: null });
+  const [applying, setApplying] = useState(false);
+  const resummarize = async () => {
+    if (!m?.raw_text?.trim()) return alert("원문이 없어 재요약할 수 없습니다.");
+    if (!confirm("저장된 원문으로 요약을 다시 생성할까요?\n적용을 누르기 전까지는 기존 요약이 유지됩니다.")) return;
+    const t0 = Date.now();
+    const ticker = setInterval(
+      () => setResum((p) => (p.status === "running" ? { ...p, elapsed: Math.round((Date.now() - t0) / 1000) } : p)),
+      1000,
+    );
+    const log = (line, replace = false) => {
+      const entry = `[+${((Date.now() - t0) / 1000).toFixed(0)}s] ${line}`;
+      setResum((p) => ({ ...p, log: replace && p.log.length ? [...p.log.slice(0, -1), entry] : [...p.log, entry] }));
+    };
+    setResum({ status: "running", log: [], elapsed: 0, preview: null });
+    try {
+      const used = { in: 0, out: 0 };
+      const addUsage = (x) => {
+        used.in += x?.promptTokenCount ?? x?.prompt_tokens ?? 0;
+        used.out += x?.candidatesTokenCount ?? x?.completion_tokens ?? 0;
+      };
+      const result = await summarizeText(m.raw_text, settings, log, addUsage);
+      api("/api/usage", {
+        method: "POST",
+        body: JSON.stringify({
+          kind: "summary",
+          provider: settings.summaryProvider === "local" ? "local" : settings.summaryProvider === "openai" ? "openai" : "gemini",
+          model:
+            settings.summaryProvider === "local" ? settings.localModel
+            : settings.summaryProvider === "openai" ? settings.openaiSumModel
+            : settings.model,
+          input_tokens: used.in || null,
+          output_tokens: used.out || null,
+        }),
+      }).catch(() => {});
+      setResum({
+        status: "preview",
+        log: [],
+        elapsed: 0,
+        preview: {
+          summary: result.summary ?? [],
+          agenda: result.agenda ?? [],
+          action_items: result.action_items ?? [],
+          tags: result.tags ?? [],
+        },
+      });
+    } catch (e) {
+      alert("재요약 실패: " + e.message);
+      api("/api/log", { method: "POST", body: JSON.stringify({ action: "summarize_error", detail: `재요약 #${id}: ${String(e.message).slice(0, 400)}` }) }).catch(() => {});
+      setResum({ status: "idle", log: [], elapsed: 0, preview: null });
+    } finally {
+      clearInterval(ticker);
+    }
+  };
+  const applyResummary = async () => {
+    setApplying(true);
+    try {
+      const p = resum.preview;
+      const updated = await api(`/api/meetings/${id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          title: m.title,
+          text: m.raw_text,
+          visibility: m.visibility,
+          project_id: m.project_id,
+          summary: p.summary.map((s) => s.trim()).filter(Boolean),
+          agenda: p.agenda.filter((a) => a.topic?.trim() || a.discussion?.trim()),
+          action_items: p.action_items.filter((a) => a.task?.trim()),
+          tags: p.tags.map((t) => t.trim()).filter(Boolean),
+        }),
+      });
+      setM(updated);
+      setResum({ status: "idle", log: [], elapsed: 0, preview: null });
+      const n = updated.integrations?.notion;
+      setSyncMsg(
+        n
+          ? n.ok
+            ? { text: "🔁 재요약이 적용되고 Notion 페이지도 교체되었습니다.", url: n.url }
+            : { text: "🔁 재요약은 적용됐지만 Notion 반영 실패: " + n.error, url: null }
+          : { text: "🔁 재요약이 적용되었습니다.", url: null },
+      );
+    } catch (e) {
+      alert("적용 실패: " + e.message);
+    } finally {
+      setApplying(false);
+    }
+  };
 
   // Notion/Dooray 재전송 — 저장 시 실패했거나 연동 설정 전에 만든 회의록을 나중에 전송
   const [syncing, setSyncing] = useState(false);
@@ -3576,6 +3665,14 @@ function Detail({ id, onBack, projects, me }) {
               </button>
             )}
             <button
+              onClick={resummarize}
+              disabled={resum.status === "running"}
+              title="저장된 원문으로 요약·아젠다·액션 아이템을 다시 생성합니다"
+              className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+            >
+              {resum.status === "running" ? "요약 중…" : "🔁 재요약"}
+            </button>
+            <button
               onClick={() => setEditing(true)}
               className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
             >
@@ -3611,6 +3708,42 @@ function Detail({ id, onBack, projects, me }) {
             </a>
           )}
           <button onClick={() => setSyncMsg(null)} title="닫기" className="text-teal-500 hover:text-teal-700">✕</button>
+        </div>
+      )}
+
+      {/* 재요약 진행 로그 */}
+      {resum.status === "running" && (
+        <div className="rounded-xl border border-teal-200 bg-teal-50/40 px-4 py-2.5">
+          <div className="flex items-center gap-2 text-xs font-semibold text-teal-700">
+            <span className="inline-block size-2 animate-pulse rounded-full bg-teal-500" />
+            재요약 진행 중 · {resum.elapsed}초 경과
+          </div>
+          {resum.log.slice(-2).map((l, i) => (
+            <p key={i} className="mt-1 font-mono text-xs text-slate-600">{l}</p>
+          ))}
+        </div>
+      )}
+
+      {/* 재요약 미리보기 — 항목 편집 후 적용하면 기존 요약을 덮어씀 */}
+      {resum.status === "preview" && (
+        <div className="space-y-3">
+          <SummaryPreview data={resum.preview} onChange={(p) => setResum((s) => ({ ...s, preview: p }))} />
+          <div className="flex justify-end gap-3">
+            <button
+              onClick={() => setResum({ status: "idle", log: [], elapsed: 0, preview: null })}
+              disabled={applying}
+              className="rounded-xl px-4 py-2.5 text-sm font-medium text-slate-500 hover:bg-slate-100 disabled:opacity-40"
+            >
+              취소 (기존 요약 유지)
+            </button>
+            <button
+              onClick={applyResummary}
+              disabled={applying}
+              className="rounded-xl bg-teal-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-teal-600 disabled:opacity-40"
+            >
+              {applying ? "적용 중…" : "이 요약으로 덮어쓰기"}
+            </button>
+          </div>
         </div>
       )}
 
@@ -4519,7 +4652,7 @@ export default function App() {
           />
         )}
         {view.name === "detail" && (
-          <Detail id={view.id} projects={projects} me={me} onBack={() => setView({ name: "list" })} />
+          <Detail id={view.id} projects={projects} me={me} settings={settings} onBack={() => setView({ name: "list" })} />
         )}
         {view.name === "admin" && <AdminUsers onBack={() => setView({ name: "list" })} />}
       </main>
