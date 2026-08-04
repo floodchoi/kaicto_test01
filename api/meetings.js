@@ -68,20 +68,25 @@ export default wrap(async function handler(req, res) {
         FROM users WHERE id = ${userId}`;
       let projectName = null;
       let projectDoorayId = null;
+      let projectNotion = null; // { id, type } — 프로젝트별 Notion 저장 위치
       if (projectId) {
-        const [pj] = await sql`SELECT name, dooray_project_id FROM projects WHERE id = ${projectId}`;
+        const [pj] = await sql`
+          SELECT name, dooray_project_id, notion_target_id, notion_target_type FROM projects WHERE id = ${projectId}`;
         projectName = pj?.name ?? null;
         projectDoorayId = pj?.dooray_project_id ?? null;
+        if (pj?.notion_target_id) projectNotion = { id: pj.notion_target_id, type: pj.notion_target_type ?? "database" };
       }
       const meetingData = {
         title, text,
         summary: summary ?? [], agenda: agenda ?? [], action_items: action_items ?? [], tags: tags ?? [],
         project: projectName, meetingId: meeting.id, createdAt: meeting.created_at,
       };
-      if (wantNotion && cfg?.notion_token_enc && cfg?.notion_target_id) {
+      // Notion 대상: 프로젝트별 매핑 우선, 없으면 설정의 기본 테이블 (토큰은 항상 사용자 공용 토큰)
+      const notionTarget = projectNotion ?? (cfg?.notion_target_id ? { id: cfg.notion_target_id, type: cfg.notion_target_type ?? "database" } : null);
+      if (wantNotion && cfg?.notion_token_enc && notionTarget) {
         try {
           const { url, pageId } = await pushToNotion(
-            { token: decryptSecret(cfg.notion_token_enc), targetId: cfg.notion_target_id, targetType: cfg.notion_target_type ?? "database" },
+            { token: decryptSecret(cfg.notion_token_enc), targetId: notionTarget.id, targetType: notionTarget.type },
             meetingData,
           );
           integrations.notion = { ok: true, url };
@@ -146,7 +151,8 @@ export default wrap(async function handler(req, res) {
     ${isDate(from) ? sql`AND m.created_at >= ${from}::date` : sql``}
     ${isDate(to) ? sql`AND m.created_at < ${to}::date + 1` : sql``}
     ${project === "none" ? sql`AND m.project_id IS NULL` : /^\d+$/.test(project) ? sql`AND m.project_id = ${Number(project)}` : sql``}
-    ORDER BY m.created_at DESC`;
+    ORDER BY m.created_at DESC
+    ${/^\d+$/.test(req.query.limit ?? "") ? sql`LIMIT ${Math.min(1000, Number(req.query.limit))}` : sql``}`;
 
   res.status(200).json(rows);
 });

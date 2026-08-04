@@ -1,8 +1,8 @@
 import { sql } from "../_db.js";
 import { wrap } from "../_wrap.js";
 import { requireAuth, decryptSecret, decryptText } from "../_auth.js";
-import { testNotion, pushToNotion, archiveNotionPage } from "../_notion.js";
-import { testDooray, pushTasksToDooray, pushWikiToDooray } from "../_dooray.js";
+import { testNotion, testNotionToken, pushToNotion, archiveNotionPage } from "../_notion.js";
+import { testDooray, testDoorayToken, pushTasksToDooray, pushWikiToDooray } from "../_dooray.js";
 import { editCond } from "../meetings.js";
 import { logAct } from "../_log.js";
 
@@ -30,13 +30,15 @@ export default wrap(async function handler(req, res) {
   }
 
   const action = req.body?.action;
-  const hasNotion = !!(u?.notion_token_enc && u?.notion_target_id);
-  const hasDooray = !!u?.dooray_token_enc; // 대상 프로젝트는 회의록별 매핑 또는 기본값에서 결정
+  const hasNotion = !!u?.notion_token_enc; // 대상(테이블)은 프로젝트별 매핑 또는 기본값에서 결정
+  const hasDooray = !!u?.dooray_token_enc;
 
   // 회의록 1건 로드(권한 검사 포함) + 전송용 데이터 구성. 없으면 null.
   const loadMeeting = async (meetingId) => {
     const [m] = await sql`
-      SELECT m.*, p.name AS project_name, p.dooray_project_id AS project_dooray_id FROM meetings m
+      SELECT m.*, p.name AS project_name, p.dooray_project_id AS project_dooray_id,
+             p.notion_target_id AS project_notion_id, p.notion_target_type AS project_notion_type
+      FROM meetings m
       LEFT JOIN projects p ON p.id = m.project_id
       WHERE m.id = ${meetingId} AND ${editCond(userId)}`;
     if (!m) return null;
@@ -45,6 +47,11 @@ export default wrap(async function handler(req, res) {
     return {
       m,
       doorayPid: m.project_dooray_id || u?.dooray_project_id || null,
+      notionTarget: m.project_notion_id
+        ? { id: m.project_notion_id, type: m.project_notion_type ?? "database" }
+        : u?.notion_target_id
+          ? { id: u.notion_target_id, type: u.notion_target_type ?? "database" }
+          : null,
       data: {
         title: m.title,
         text: decryptText(m.raw_text),
@@ -60,9 +67,9 @@ export default wrap(async function handler(req, res) {
   };
 
   // 한 회의록을 Notion/Dooray로 전송 (성공 시 synced_at 기록). skipSynced=true면 이미 전송분 건너뜀.
-  const sendOne = async ({ m, data, doorayPid }, skipSynced, label = "") => {
+  const sendOne = async ({ m, data, doorayPid, notionTarget }, skipSynced, label = "") => {
     const out = {};
-    if (hasNotion) {
+    if (hasNotion && notionTarget) {
       if (skipSynced && m.notion_synced_at) out.notion = { skipped: true };
       else {
         try {
@@ -70,7 +77,7 @@ export default wrap(async function handler(req, res) {
           // 이미 전송된 페이지가 있으면 보관 처리 후 새로 생성 = 중복 없이 교체(업데이트)
           if (m.notion_page_id) await archiveNotionPage(token, m.notion_page_id);
           const { url, pageId } = await pushToNotion(
-            { token, targetId: u.notion_target_id, targetType: u.notion_target_type ?? "database" },
+            { token, targetId: notionTarget.id, targetType: notionTarget.type },
             data,
           );
           out.notion = { ok: true, url, updated: !!m.notion_page_id };
@@ -138,15 +145,32 @@ export default wrap(async function handler(req, res) {
     await logAct(userId, "notion_sync", `일괄 전송: 성공 ${summary.sent} · 건너뜀 ${summary.skipped} · 실패 ${summary.failed}`);
     return res.status(200).json(summary);
   }
-  if (action === "notion_test") {
-    if (!u?.notion_token_enc || !u?.notion_target_id)
-      return res.status(400).json({ error: "먼저 Notion 토큰과 대상(페이지/DB)을 저장해주세요." });
+  // 토큰만 검사 (대상과 무관)
+  if (action === "notion_token_test") {
+    if (!u?.notion_token_enc) return res.status(400).json({ error: "먼저 Notion 토큰을 저장해주세요." });
     try {
-      const title = await testNotion({
-        token: decryptSecret(u.notion_token_enc),
-        targetId: u.notion_target_id,
-        targetType: u.notion_target_type ?? "database",
-      });
+      return res.status(200).json({ ok: true, title: await testNotionToken(decryptSecret(u.notion_token_enc)) });
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
+  }
+  if (action === "dooray_token_test") {
+    if (!u?.dooray_token_enc) return res.status(400).json({ error: "먼저 Dooray 토큰을 저장해주세요." });
+    try {
+      return res.status(200).json({ ok: true, title: await testDoorayToken(decryptSecret(u.dooray_token_enc)) });
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
+  }
+
+  // 저장 위치 검사 — targetId를 주면 그 대상(프로젝트별 테이블)을, 없으면 기본 설정을 검사
+  if (action === "notion_test") {
+    if (!u?.notion_token_enc) return res.status(400).json({ error: "먼저 Notion 토큰을 저장해주세요." });
+    const targetId = String(req.body?.targetId ?? "").trim() || u.notion_target_id;
+    const targetType = req.body?.targetId ? (req.body?.targetType === "page" ? "page" : "database") : (u.notion_target_type ?? "database");
+    if (!targetId) return res.status(400).json({ error: "저장할 Notion 테이블(또는 페이지)을 입력해주세요." });
+    try {
+      const title = await testNotion({ token: decryptSecret(u.notion_token_enc), targetId, targetType });
       return res.status(200).json({ ok: true, title });
     } catch (e) {
       // 접근 실패는 서버 장애(500)가 아니라 설정 문제 — 원인을 그대로 안내
@@ -154,13 +178,11 @@ export default wrap(async function handler(req, res) {
     }
   }
   if (action === "dooray_test") {
-    if (!u?.dooray_token_enc || !u?.dooray_project_id)
-      return res.status(400).json({ error: "먼저 Dooray 토큰과 프로젝트 ID를 저장해주세요." });
+    if (!u?.dooray_token_enc) return res.status(400).json({ error: "먼저 Dooray 토큰을 저장해주세요." });
+    const projectId = String(req.body?.projectId ?? "").trim() || u.dooray_project_id;
+    if (!projectId) return res.status(400).json({ error: "저장할 Dooray 프로젝트 ID를 입력해주세요." });
     try {
-      const name = await testDooray({
-        token: decryptSecret(u.dooray_token_enc),
-        projectId: u.dooray_project_id,
-      });
+      const name = await testDooray({ token: decryptSecret(u.dooray_token_enc), projectId });
       return res.status(200).json({ ok: true, title: String(name) });
     } catch (e) {
       return res.status(400).json({ error: e.message });

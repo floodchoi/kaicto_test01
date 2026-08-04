@@ -47,7 +47,9 @@ CREATE TABLE IF NOT EXISTS projects (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE projects
-  ADD COLUMN IF NOT EXISTS dooray_project_id TEXT; -- 이 프로젝트의 회의록을 보낼 Dooray 프로젝트
+  ADD COLUMN IF NOT EXISTS dooray_project_id TEXT, -- 이 프로젝트의 회의록을 보낼 Dooray 프로젝트
+  ADD COLUMN IF NOT EXISTS notion_target_id  TEXT, -- 이 프로젝트의 회의록을 보낼 Notion 테이블/페이지
+  ADD COLUMN IF NOT EXISTS notion_target_type TEXT; -- 'database' | 'page'
 
 -- 3-1) 프로젝트 멤버 — 지정된 회원은 프로젝트의 모든 회의록을 열람·수정 가능
 CREATE TABLE IF NOT EXISTS project_members (

@@ -73,7 +73,7 @@ export default wrap(async function handler(req, res) {
               (SELECT 1 FROM activity_log WHERE false) AS _probe_log,
               (SELECT 1 FROM api_usage WHERE false) AS _probe_usage,
               (SELECT notion_page_id FROM meetings WHERE false) AS _probe_sync,
-              (SELECT dooray_project_id FROM projects WHERE false) AS _probe_pjdooray`;
+              (SELECT notion_target_id FROM projects WHERE false) AS _probe_pjnotion`;
   if (!me) return res.status(401).json({ error: "로그인이 필요합니다." });
 
   const ownKey = me.gemini_key_enc ? decryptSecret(me.gemini_key_enc) : null;

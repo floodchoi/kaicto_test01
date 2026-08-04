@@ -13,7 +13,8 @@ export default wrap(async function handler(req, res) {
 
   if (req.method === "GET") {
     const rows = await sql`
-      SELECT p.id, p.name, p.is_shared, p.dooray_project_id, (p.owner_id = ${userId}) AS is_mine,
+      SELECT p.id, p.name, p.is_shared, p.dooray_project_id, p.notion_target_id, p.notion_target_type,
+             (p.owner_id = ${userId}) AS is_mine,
              EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = p.id AND pm.user_id = ${userId}) AS is_member,
              (SELECT count(*)::int FROM meetings m
                WHERE m.project_id = p.id
@@ -51,12 +52,19 @@ export default wrap(async function handler(req, res) {
     } else if (Number.isInteger(removeUserId) && removeUserId > 0) {
       await sql`DELETE FROM project_members WHERE project_id = ${projectId} AND user_id = ${removeUserId}`;
       await logAct(userId, "member_remove", `프로젝트 #${projectId} → 사용자 #${removeUserId}`);
-    } else if ("doorayProjectId" in (req.body ?? {})) {
-      // 이 프로젝트의 회의록을 보낼 Dooray 프로젝트 매핑 (빈 값 = 매핑 해제 → 설정 기본값 사용)
-      const v = String(req.body.doorayProjectId ?? "").trim().slice(0, 100) || null;
-      await sql`UPDATE projects SET dooray_project_id = ${v} WHERE id = ${projectId}`;
+    } else if ("doorayProjectId" in (req.body ?? {}) || "notionTargetId" in (req.body ?? {})) {
+      // 이 프로젝트의 회의록 저장 위치 매핑 (빈 값 = 매핑 해제 → 설정 기본값 사용)
+      if ("doorayProjectId" in req.body) {
+        const v = String(req.body.doorayProjectId ?? "").trim().slice(0, 100) || null;
+        await sql`UPDATE projects SET dooray_project_id = ${v} WHERE id = ${projectId}`;
+      }
+      if ("notionTargetId" in req.body) {
+        const v = String(req.body.notionTargetId ?? "").trim().slice(0, 300) || null;
+        const t = req.body.notionTargetType === "page" ? "page" : "database";
+        await sql`UPDATE projects SET notion_target_id = ${v}, notion_target_type = ${t} WHERE id = ${projectId}`;
+      }
     } else {
-      return res.status(400).json({ error: "addUserId, removeUserId 또는 doorayProjectId가 필요합니다." });
+      return res.status(400).json({ error: "addUserId, removeUserId, doorayProjectId 또는 notionTargetId가 필요합니다." });
     }
     return res.status(200).json({ ok: true });
   }

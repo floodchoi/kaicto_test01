@@ -1112,8 +1112,12 @@ function Login({ onLogin }) {
   const isSignup = mode === "signup";
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4">
-      <form onSubmit={submit} className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
+    <div className="min-h-screen bg-slate-50">
+      <div className="mx-auto grid min-h-screen max-w-5xl items-center gap-10 px-4 py-10 lg:grid-cols-2">
+        {/* 왼쪽: 제품 소개 — 회의록이 만들어지는 과정을 애니메이션으로 */}
+        <LandingHero />
+
+        <form onSubmit={submit} className="w-full max-w-sm justify-self-center rounded-2xl border border-slate-200 bg-white p-8 shadow-sm lg:justify-self-end">
         <div className="flex items-center gap-2">
           <span className="text-2xl">📝</span>
           <h1 className="text-lg font-bold text-slate-800">Meeting Minutes</h1>
@@ -1190,7 +1194,91 @@ function Login({ onLogin }) {
         >
           {isSignup ? "이미 계정이 있으신가요? 로그인" : "계정이 없으신가요? 회원가입"}
         </button>
-      </form>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+/* 랜딩 소개 — 녹음 → 전사 → 요약 흐름을 타이핑 애니메이션으로 보여준다 */
+function LandingHero() {
+  const DEMO = [
+    { s: "화자 1", t: "이번 분기 예산부터 정리하겠습니다." },
+    { s: "화자 2", t: "3분기 초과분은 마케팅 쪽이 큽니다." },
+    { s: "화자 1", t: "그럼 금요일까지 수정안 주세요." },
+  ];
+  const RESULT = {
+    summary: "3분기 예산 초과분을 검토하고 수정안 일정을 확정했다.",
+    action: "예산 수정안 작성 · 담당 화자2 · 금요일",
+  };
+  const [step, setStep] = useState(0); // 0,1,2: 전사 줄 / 3: 요약 완료
+  const [typed, setTyped] = useState("");
+  useEffect(() => {
+    if (step >= DEMO.length) {
+      const t = setTimeout(() => { setStep(0); setTyped(""); }, 4000); // 처음부터 반복
+      return () => clearTimeout(t);
+    }
+    const full = DEMO[step].t;
+    if (typed.length < full.length) {
+      const t = setTimeout(() => setTyped(full.slice(0, typed.length + 1)), 35);
+      return () => clearTimeout(t);
+    }
+    const t = setTimeout(() => { setStep((s) => s + 1); setTyped(""); }, 600);
+    return () => clearTimeout(t);
+  }, [step, typed]);
+
+  const done = step >= DEMO.length;
+  return (
+    <div className="max-w-md">
+      <h2 className="text-3xl font-bold leading-snug text-slate-800">
+        회의는 <span className="text-teal-700">녹음</span>만 하세요.<br />
+        정리는 AI가 합니다.
+      </h2>
+      <p className="mt-3 text-sm leading-relaxed text-slate-500">
+        녹음·오디오 파일을 올리면 화자를 구분해 전사하고, 3줄 요약·아젠다·액션 아이템까지 자동으로 만들어
+        팀과 공유합니다. Notion·Dooray로 자동 전송도 됩니다.
+      </p>
+
+      {/* 실시간 데모 카드 */}
+      <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex items-center gap-2 text-xs font-semibold text-red-500">
+          <span className={`inline-block size-2 rounded-full bg-red-500 ${done ? "" : "animate-pulse"}`} />
+          {done ? "전사 완료 — AI 요약" : "회의 녹음 중… 실시간 전사"}
+        </div>
+
+        <div className="mt-3 space-y-1.5 text-sm">
+          {DEMO.slice(0, step).map((d, i) => (
+            <p key={i} className="text-slate-600">
+              <span className="mr-1.5 font-semibold text-teal-700">{d.s}</span>{d.t}
+            </p>
+          ))}
+          {!done && (
+            <p className="text-slate-600">
+              <span className="mr-1.5 font-semibold text-teal-700">{DEMO[step].s}</span>
+              {typed}
+              <span className="ml-0.5 inline-block h-4 w-px animate-pulse bg-slate-400 align-middle" />
+            </p>
+          )}
+        </div>
+
+        {done && (
+          <div className="mt-4 space-y-2 border-t border-slate-100 pt-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">3줄 요약</p>
+            <p className="text-sm text-slate-700">{RESULT.summary}</p>
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">액션 아이템</p>
+            <p className="flex items-center gap-2 text-sm text-slate-700">
+              <span className="inline-block size-3.5 rounded border border-teal-500" />
+              {RESULT.action}
+            </p>
+          </div>
+        )}
+      </div>
+
+      <ul className="mt-5 flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-slate-500">
+        {["🎙️ 앱 내 녹음·긴 파일 분할 전사", "🗣️ 화자 분리", "🔒 원문 암호화 저장", "📝 Notion · 📋 Dooray 연동"].map((f) => (
+          <li key={f}>{f}</li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -1594,11 +1682,16 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
                 {label}
               </label>
             ))}
-            <button type="button" onClick={() => runTest("notion_test")}
-              className="ml-auto text-xs font-medium text-teal-700 hover:underline">🔌 연결 테스트</button>
+            <span className="ml-auto flex items-center gap-3">
+              <button type="button" onClick={() => runTest("notion_token_test")}
+                className="text-xs font-medium text-teal-700 hover:underline">🔑 토큰 확인</button>
+              <button type="button" onClick={() => runTest("notion_test")}
+                className="text-xs font-medium text-teal-700 hover:underline">📋 테이블 확인</button>
+            </span>
           </div>
           <p className="mt-1 text-xs text-slate-400">
-            ⚠️ Notion에서 대상 페이지/DB를 열고 ··· → 연결 → 만든 통합을 추가해야 접근됩니다. 테스트는 저장 후 가능합니다.
+            ⚠️ Notion에서 대상 페이지/DB를 열고 ··· → 연결 → 만든 통합을 추가해야 접근됩니다. 확인은 저장 후 가능합니다.
+            위 테이블은 <b>기본값</b>이며, 📁 프로젝트 관리에서 프로젝트별로 다른 테이블을 지정할 수 있습니다.
           </p>
 
           <h4 className="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-400">Dooray</h4>
@@ -1613,8 +1706,10 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
           <div className="mt-2 flex items-center gap-2">
             <input value={doorayProject} onChange={(e) => setDoorayProject(e.target.value)}
               placeholder="Dooray 프로젝트 ID" className={INPUT_CLS + " mt-0 flex-1"} />
+            <button type="button" onClick={() => runTest("dooray_token_test")}
+              className="shrink-0 text-xs font-medium text-teal-700 hover:underline">🔑 토큰</button>
             <button type="button" onClick={() => runTest("dooray_test")}
-              className="shrink-0 text-xs font-medium text-teal-700 hover:underline">🔌 연결 테스트</button>
+              className="shrink-0 text-xs font-medium text-teal-700 hover:underline">📋 프로젝트</button>
           </div>
           {testMsg && <p className="mt-2 rounded-lg bg-slate-50 px-3 py-1.5 text-xs text-slate-600">{testMsg}</p>}
         </div>
@@ -1722,9 +1817,12 @@ function ProjectMembers({ p, onChanged }) {
   const [q, setQ] = useState("");
   const [results, setResults] = useState([]);
   const [error, setError] = useState(null);
-  // 이 프로젝트의 회의록을 보낼 Dooray 프로젝트 (비우면 설정의 기본값 사용)
+  // 이 프로젝트의 회의록 저장 위치 (비우면 ⚙️ 설정의 기본값 사용) — 토큰은 설정의 공용 토큰
   const [dooray, setDooray] = useState(p.dooray_project_id ?? "");
   const [doorayMsg, setDoorayMsg] = useState("");
+  const [notionTarget, setNotionTarget] = useState(p.notion_target_id ?? "");
+  const [notionType, setNotionType] = useState(p.notion_target_type ?? "database");
+  const [notionMsg, setNotionMsg] = useState("");
   const saveDooray = async () => {
     setDoorayMsg("");
     try {
@@ -1736,6 +1834,37 @@ function ProjectMembers({ p, onChanged }) {
       onChanged();
     } catch (e) {
       setDoorayMsg("⚠️ " + e.message);
+    }
+  };
+  const saveNotion = async () => {
+    setNotionMsg("");
+    try {
+      await api("/api/projects", {
+        method: "PATCH",
+        body: JSON.stringify({ projectId: p.id, notionTargetId: notionTarget.trim(), notionTargetType: notionType }),
+      });
+      setNotionMsg("✅ 저장됨");
+      onChanged();
+    } catch (e) {
+      setNotionMsg("⚠️ " + e.message);
+    }
+  };
+  // 저장 위치(테이블) 유효성만 검사 — 토큰 검사는 ⚙️ 설정에서 별도로
+  const testTarget = async (kind) => {
+    const set = kind === "notion" ? setNotionMsg : setDoorayMsg;
+    set("확인 중…");
+    try {
+      const r = await api("/api/integrations", {
+        method: "POST",
+        body: JSON.stringify(
+          kind === "notion"
+            ? { action: "notion_test", targetId: notionTarget.trim(), targetType: notionType }
+            : { action: "dooray_test", projectId: dooray.trim() },
+        ),
+      });
+      set(`✅ ${r.title}`);
+    } catch (e) {
+      set("⚠️ " + e.message);
     }
   };
   useEffect(() => {
@@ -1798,21 +1927,51 @@ function ProjectMembers({ p, onChanged }) {
       <p className="mt-2 text-xs text-slate-400">멤버는 이 프로젝트의 모든 회의록을 보고 수정할 수 있습니다.</p>
       {error && <p className="mt-1 text-xs text-red-500">⚠️ {error}</p>}
 
-      {/* Dooray 프로젝트 매핑 — 이 프로젝트의 회의록이 저장될 Dooray 프로젝트 */}
-      <div className="mt-3 border-t border-slate-200 pt-3">
-        <label className="text-xs font-semibold text-slate-600">Dooray 프로젝트 연동</label>
-        <div className="mt-1.5 flex items-center gap-2">
-          <input value={dooray} onChange={(e) => setDooray(e.target.value)}
-            placeholder="Dooray 프로젝트 ID (비우면 설정의 기본값 사용)"
-            className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm outline-none focus:border-teal-500" />
-          <button onClick={saveDooray}
-            className="shrink-0 rounded-lg bg-teal-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-teal-600">
-            저장
-          </button>
-          {doorayMsg && <span className="shrink-0 text-xs text-slate-500">{doorayMsg}</span>}
+      {/* 프로젝트별 저장 위치 — 토큰은 ⚙️ 설정의 공용 토큰, 위치만 여기서 지정 */}
+      <div className="mt-3 space-y-3 border-t border-slate-200 pt-3">
+        <div>
+          <label className="text-xs font-semibold text-slate-600">📝 Notion 저장 테이블</label>
+          <div className="mt-1.5 flex items-center gap-2">
+            <input value={notionTarget} onChange={(e) => setNotionTarget(e.target.value)}
+              placeholder="테이블(DB)/페이지 URL 또는 ID — 비우면 설정의 기본값"
+              className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm outline-none focus:border-teal-500" />
+            <button onClick={saveNotion}
+              className="shrink-0 rounded-lg bg-teal-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-teal-600">
+              저장
+            </button>
+            <button onClick={() => testTarget("notion")}
+              className="shrink-0 text-xs font-medium text-teal-700 hover:underline">테이블 확인</button>
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-3">
+            {[["database", "테이블(DB)에 행 추가"], ["page", "페이지 아래 하위 페이지"]].map(([v, label]) => (
+              <label key={v} className="flex cursor-pointer items-center gap-1.5 text-xs text-slate-500">
+                <input type="radio" checked={notionType === v} onChange={() => setNotionType(v)} className="accent-teal-700" />
+                {label}
+              </label>
+            ))}
+            {notionMsg && <span className="text-xs text-slate-500">{notionMsg}</span>}
+          </div>
         </div>
-        <p className="mt-1 text-xs text-slate-400">
-          이 프로젝트의 회의록은 지정한 Dooray 프로젝트의 <b>위키에 본문</b>이, <b>업무에 액션 아이템</b>이 저장됩니다.
+
+        <div>
+          <label className="text-xs font-semibold text-slate-600">📋 Dooray 프로젝트</label>
+          <div className="mt-1.5 flex items-center gap-2">
+            <input value={dooray} onChange={(e) => setDooray(e.target.value)}
+              placeholder="Dooray 프로젝트 ID — 비우면 설정의 기본값"
+              className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm outline-none focus:border-teal-500" />
+            <button onClick={saveDooray}
+              className="shrink-0 rounded-lg bg-teal-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-teal-600">
+              저장
+            </button>
+            <button onClick={() => testTarget("dooray")}
+              className="shrink-0 text-xs font-medium text-teal-700 hover:underline">프로젝트 확인</button>
+          </div>
+          {doorayMsg && <p className="mt-1 text-xs text-slate-500">{doorayMsg}</p>}
+        </div>
+
+        <p className="text-xs text-slate-400">
+          토큰은 ⚙️ 설정의 공용 토큰을 쓰고, <b>저장 위치만 프로젝트별로</b> 지정합니다.
+          Notion은 페이지 전체 내용이, Dooray는 위키에 본문·업무에 액션 아이템이 저장됩니다.
         </p>
       </div>
     </div>
@@ -2449,11 +2608,20 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, onCancelTr
     setViewMode(m);
     localStorage.setItem("list_view_mode", m);
   };
+  // 한 번에 볼 회의록 개수 (브라우저에 기억)
+  const [pageSize, setPageSize] = useState(() => localStorage.getItem("list_page_size") ?? "20");
+  const changePageSize = (v) => {
+    setPageSize(v);
+    localStorage.setItem("list_page_size", v);
+  };
 
   useEffect(() => {
     const t = setTimeout(
       () =>
-        api(`/api/meetings?q=${encodeURIComponent(q)}&from=${from}&to=${to}&project=${projectFilter}`)
+        api(
+          `/api/meetings?q=${encodeURIComponent(q)}&from=${from}&to=${to}&project=${projectFilter}` +
+            (pageSize === "all" ? "" : `&limit=${pageSize}`),
+        )
           .then((rows) => {
             setMeetings(rows);
             // 기본(무필터) 목록만 캐시 — 다음 방문의 첫 페인트용
@@ -2466,7 +2634,7 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, onCancelTr
       q ? 300 : 0,
     );
     return () => clearTimeout(t);
-  }, [q, from, to, projectFilter]);
+  }, [q, from, to, projectFilter, pageSize]);
 
   const hasFilter = q || from || to || projectFilter;
 
@@ -2540,6 +2708,12 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, onCancelTr
             className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-600 shadow-sm outline-none focus:border-teal-500 sm:flex-none" />
         </div>
         <ProjectSelect projects={projects} value={projectFilter} onChange={setProjectFilter} />
+        <select value={pageSize} onChange={(e) => changePageSize(e.target.value)} title="한 번에 볼 회의록 개수"
+          className="rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-600 shadow-sm outline-none focus:border-teal-500">
+          {[["20", "20개"], ["50", "50개"], ["100", "100개"], ["all", "전체"]].map(([v, label]) => (
+            <option key={v} value={v}>{label}</option>
+          ))}
+        </select>
         <button onClick={onManageProjects} title="프로젝트 추가/삭제"
           className="rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-500 shadow-sm hover:bg-slate-50">
           📁 관리
@@ -2588,6 +2762,13 @@ function Dashboard({ onOpen, onNew, trans, onGotoNew, onDismissTrans, onCancelTr
           <span className="min-w-0 flex-1">{bulkMsg}</span>
           <button onClick={() => setBulkMsg(null)} title="닫기" className="text-teal-500 hover:text-teal-700">✕</button>
         </div>
+      )}
+
+      {/* 표시 개수에 도달하면 더 있을 수 있음을 안내 */}
+      {meetings !== null && pageSize !== "all" && meetings.length >= Number(pageSize) && (
+        <p className="text-xs text-slate-400">
+          최근 {pageSize}개만 표시 중입니다 — 더 보려면 위에서 개수를 늘리거나 검색·필터를 사용하세요.
+        </p>
       )}
 
       {meetings === null ? (

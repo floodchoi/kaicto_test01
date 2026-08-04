@@ -7,6 +7,13 @@ const headers = (token) => ({
   "Content-Type": "application/json",
 });
 
+// 토큰 유효성만 확인 (대상 프로젝트와 무관) — 위키 목록 조회가 되면 토큰 유효
+export async function testDoorayToken(token) {
+  const res = await fetch(`${BASE}/wiki/v1/wikis?page=0&size=1`, { headers: headers(token) });
+  if (!res.ok) throw new Error(`Dooray 토큰이 유효하지 않습니다 (HTTP ${res.status})`);
+  return "토큰 유효";
+}
+
 // 연결 테스트: 프로젝트 조회
 export async function testDooray({ token, projectId }) {
   const res = await fetch(`${BASE}/project/v1/projects/${encodeURIComponent(projectId)}`, {

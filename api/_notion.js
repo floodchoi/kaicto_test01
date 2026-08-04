@@ -68,6 +68,17 @@ export function buildBlocks({ summary, agenda, action_items, tags, text, project
   return blocks.slice(0, 100);
 }
 
+// 토큰 유효성만 확인 (대상과 무관) — /v1/users/me 는 토큰이 유효하면 봇 정보를 반환
+export async function testNotionToken(token) {
+  const res = await fetch(`${BASE}/v1/users/me`, { headers: headers(token) });
+  if (!res.ok) {
+    const msg = (await res.json().catch(() => ({}))).message ?? `HTTP ${res.status}`;
+    throw new Error(`Notion 토큰이 유효하지 않습니다: ${msg}`);
+  }
+  const d = await res.json().catch(() => ({}));
+  return d?.name ? `토큰 유효 (통합: ${d.name})` : "토큰 유효";
+}
+
 // 연결 테스트: 대상(DB/페이지)에 접근 가능한지 확인, 제목 반환.
 // 못 찾으면 반대 유형으로도 조회해 "유형이 잘못됐다"까지 짚어준다.
 export async function testNotion({ token, targetId, targetType }) {
