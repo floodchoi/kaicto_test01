@@ -710,11 +710,16 @@ const SUMMARY_SYSTEM = `너는 회의록 정리 전문가다. 사용자가 준 �
 - 출력 언어는 무조건 한국어다. 회의가 영어 등 외국어로 진행됐어도 summary·agenda(topic, discussion)·action_items(task)·tags 전부 한국어로 작성한다. 제품명·고유명사·전문용어만 원어를 그대로 쓸 수 있다.
 - 회의가 아무리 길어도 전사문을 처음부터 끝까지 빠짐없이 읽고 반영한다. 앞부분만 정리하고 중반·후반 내용을 누락하는 것은 실패다.
 - summary: 회의 전체(초반·중반·후반 모두)를 정확히 3문장으로 요약 (한 문장 = 배열 원소 하나)
-- agenda: 회의에서 다뤄진 모든 주제를 등장 순서대로. 각 항목은 topic(짧은 제목)과 discussion(논의 내용 2~3문장 요약). 개수 제한 없음 — 긴 회의라면 항목이 많은 것이 정상이다. 논의 내용이 있는 한 절대 빈 배열을 반환하지 않는다.
-- action_items: 전사문 전체를 훑어 결정 사항·부탁·후속 업무를 모두 찾아낸다. "~하기로 했다", "~해 주세요", "확인해 보겠다", "다음까지 준비" 같은 표현도 모두 액션 아이템이다. 정말 하나도 없을 때만 빈 배열을 허용한다. assignee는 원문에 언급된 담당자만, 없으면 null. due_date는 원문의 기한 표현 그대로("7월 15일", "다음 주" 등), 없으면 null.
+- agenda: 회의에서 다뤄진 모든 주제를 **의미 단위로 묶어(카테고리화)** 정리한다. 같은 사안이 회의 여기저기서 반복 언급됐다면 시간 순서가 아니라 하나의 주제로 합친다. 각 항목은:
+  · topic: "[분류] 짧은 제목" 형식. 분류는 회의 내용에서 자연스럽게 도출한다(예: 기술검토, 일정, 예산, 인력, 리스크, 의사결정, 고객/영업, 후속연구 등 — 아래 목록에 없어도 회의에 맞는 이름을 만들어 쓴다).
+  · discussion: 핵심 논의·결정 사항 2~3문장 요약.
+  분류가 같은 항목끼리 배열에서 이웃하도록 순서를 정렬한다. 개수 제한 없음 — 긴 회의라면 항목이 많은 것이 정상이다. 논의 내용이 있는 한 절대 빈 배열을 반환하지 않는다.
+- action_items: 전사문 전체를 훑어 결정 사항·부탁·후속 업무를 모두 찾아낸다. "~하기로 했다", "~해 주세요", "확인해 보겠다", "다음까지 준비" 같은 표현도 모두 액션 아이템이다. 정말 하나도 없을 때만 빈 배열을 허용한다.
+  · task: "[분류] 할 일" 형식으로 쓰고, 분류는 위 아젠다에서 사용한 분류와 일치시킨다(예: "[일정] 킥오프 미팅 날짜 확정"). 같은 분류끼리 이웃하도록 정렬한다.
+  · assignee는 원문에 언급된 담당자만, 없으면 null. due_date는 원문의 기한 표현 그대로("7월 15일", "다음 주" 등), 없으면 null.
 - tags: 회의 주제를 나타내는 태그 2~5개 (한국어, 짧게)
 - 원문에 없는 내용을 지어내지 않는다.
-- 출력 직전 자체 점검: 전사문 마지막 부분의 내용이 summary나 agenda에 반영됐는가? action_items가 비어 있다면 정말 후속 업무가 전혀 없었는가? 아니라면 다시 채워서 출력한다.`;
+- 출력 직전 자체 점검: 전사문 마지막 부분의 내용이 summary나 agenda에 반영됐는가? action_items가 비어 있다면 정말 후속 업무가 전혀 없었는가? 모든 agenda·action_items에 [분류]가 붙어 있고 같은 분류끼리 모여 있는가? 아니라면 고쳐서 출력한다.`;
 
 // Gemini structured output 스키마 (OpenAPI 서브셋, 타입 대문자)
 const SUMMARY_GEMINI_SCHEMA = {
@@ -750,8 +755,8 @@ const SUMMARY_GEMINI_SCHEMA = {
 };
 
 // 로컬 LLM은 스키마 강제가 제각각이라 프롬프트로 형식을 못박는다.
-const SUMMARY_JSON_HINT = `반드시 아래 JSON만 출력하라(코드펜스·설명 금지):
-{"summary":["문장1","문장2","문장3"],"agenda":[{"topic":"...","discussion":"..."}],"action_items":[{"task":"...","assignee":null,"due_date":null}],"tags":["..."]}`;
+const SUMMARY_JSON_HINT = `반드시 아래 JSON만 출력하라(코드펜스·설명 금지). topic·task 앞의 [분류]를 빠뜨리지 마라:
+{"summary":["문장1","문장2","문장3"],"agenda":[{"topic":"[예산] 3분기 초과분 검토","discussion":"..."}],"action_items":[{"task":"[예산] 수정안 작성","assignee":null,"due_date":null}],"tags":["..."]}`;
 
 // 사용자 메시지: 긴 영어 원문 뒤에서 지시가 잊히지 않게, 한국어 출력 지시를 원문 뒤에도 한 번 더 둔다.
 const summaryUserPrompt = (text, koRetry) =>
@@ -1058,6 +1063,20 @@ async function summarizeText(text, settings, onLog, onUsage) {
   return result;
 }
 
+// 요약 결과의 "[분류] 제목" 형식을 분리 — 분류는 칩으로, 나머지는 본문으로 표시
+const splitCategory = (s) => {
+  const m = String(s ?? "").match(/^\s*\[([^\]]{1,20})\]\s*(.*)$/s);
+  return m ? { cat: m[1].trim(), rest: m[2] } : { cat: null, rest: s ?? "" };
+};
+
+function CatTag({ children }) {
+  return (
+    <span className="mr-1.5 rounded bg-slate-100 px-1.5 py-0.5 align-middle text-xs font-medium text-slate-500">
+      {children}
+    </span>
+  );
+}
+
 function Tag({ children }) {
   return (
     <span className="rounded-full bg-teal-50 px-2.5 py-0.5 text-xs font-medium text-teal-700">
@@ -1112,12 +1131,12 @@ function Login({ onLogin }) {
   const isSignup = mode === "signup";
 
   return (
-    <div className="min-h-screen bg-slate-50">
-      <div className="mx-auto grid min-h-screen max-w-5xl items-center gap-10 px-4 py-10 lg:grid-cols-2">
-        {/* 왼쪽: 제품 소개 — 회의록이 만들어지는 과정을 애니메이션으로 */}
-        <LandingHero />
+    // 좌우 분할: 왼쪽 소개(어두운 패널) · 오른쪽 로그인. 좁은 화면에선 위아래로 쌓임.
+    <div className="flex min-h-screen flex-col md:flex-row">
+      <LandingHero />
 
-        <form onSubmit={submit} className="w-full max-w-sm justify-self-center rounded-2xl border border-slate-200 bg-white p-8 shadow-sm lg:justify-self-end">
+      <div className="flex flex-1 items-center justify-center bg-slate-50 px-4 py-10">
+        <form onSubmit={submit} className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
         <div className="flex items-center gap-2">
           <span className="text-2xl">📝</span>
           <h1 className="text-lg font-bold text-slate-800">Meeting Minutes</h1>
@@ -1200,88 +1219,174 @@ function Login({ onLogin }) {
   );
 }
 
-/* 랜딩 소개 — 녹음 → 전사 → 요약 흐름을 타이핑 애니메이션으로 보여준다 */
+/* 랜딩 왼쪽 패널 — 녹음 → 전사 → 요약 과정을 보여주는 인터랙티브 데모.
+   단계 탭을 눌러 원하는 단계로 바로 이동할 수 있고, ⏸/▶로 자동 재생을 제어한다. */
+const DEMO_LINES = [
+  { s: "화자 1", t: "이번 분기 예산부터 정리하겠습니다." },
+  { s: "화자 2", t: "3분기 초과분은 마케팅 쪽이 큽니다." },
+  { s: "화자 1", t: "그럼 금요일까지 수정안 주세요." },
+];
+const DEMO_RESULT = {
+  summary: [
+    "3분기 예산 초과분의 원인을 마케팅 비용으로 확인했다.",
+    "수정안 작성 담당과 기한(금요일)을 확정했다.",
+  ],
+  actions: [
+    { task: "예산 수정안 작성", who: "화자 2", due: "금요일" },
+    { task: "초과분 상세 내역 공유", who: "화자 1", due: "내일" },
+  ],
+  tags: ["예산", "3분기", "마케팅"],
+};
+
 function LandingHero() {
-  const DEMO = [
-    { s: "화자 1", t: "이번 분기 예산부터 정리하겠습니다." },
-    { s: "화자 2", t: "3분기 초과분은 마케팅 쪽이 큽니다." },
-    { s: "화자 1", t: "그럼 금요일까지 수정안 주세요." },
-  ];
-  const RESULT = {
-    summary: "3분기 예산 초과분을 검토하고 수정안 일정을 확정했다.",
-    action: "예산 수정안 작성 · 담당 화자2 · 금요일",
-  };
-  const [step, setStep] = useState(0); // 0,1,2: 전사 줄 / 3: 요약 완료
+  const [stage, setStage] = useState(0); // 0 녹음(전사 진행) · 1 전사 완료 · 2 요약
+  const [line, setLine] = useState(0);
   const [typed, setTyped] = useState("");
+  const [playing, setPlaying] = useState(true);
+  const [level, setLevel] = useState(0.3);
+
+  // 타이핑 진행 (stage 0에서만) → 끝나면 전사 완료 → 요약 → 처음으로
   useEffect(() => {
-    if (step >= DEMO.length) {
-      const t = setTimeout(() => { setStep(0); setTyped(""); }, 4000); // 처음부터 반복
+    if (!playing) return;
+    if (stage === 0) {
+      const full = DEMO_LINES[line].t;
+      if (typed.length < full.length) {
+        const t = setTimeout(() => setTyped(full.slice(0, typed.length + 1)), 32);
+        return () => clearTimeout(t);
+      }
+      const t = setTimeout(() => {
+        if (line < DEMO_LINES.length - 1) { setLine(line + 1); setTyped(""); }
+        else setStage(1);
+      }, 550);
       return () => clearTimeout(t);
     }
-    const full = DEMO[step].t;
-    if (typed.length < full.length) {
-      const t = setTimeout(() => setTyped(full.slice(0, typed.length + 1)), 35);
-      return () => clearTimeout(t);
-    }
-    const t = setTimeout(() => { setStep((s) => s + 1); setTyped(""); }, 600);
+    const t = setTimeout(() => (stage === 1 ? setStage(2) : jumpTo(0)), stage === 1 ? 1200 : 5000);
     return () => clearTimeout(t);
-  }, [step, typed]);
+  }, [stage, line, typed, playing]);
 
-  const done = step >= DEMO.length;
+  // 녹음 단계의 입력 레벨 미터 (시각 효과)
+  useEffect(() => {
+    if (stage !== 0 || !playing) return;
+    const iv = setInterval(() => setLevel(0.25 + Math.random() * 0.75), 180);
+    return () => clearInterval(iv);
+  }, [stage, playing]);
+
+  const jumpTo = (s) => {
+    setStage(s);
+    if (s === 0) { setLine(0); setTyped(""); }
+    else { setLine(DEMO_LINES.length - 1); setTyped(DEMO_LINES.at(-1).t); }
+  };
+
+  const STEPS = [["🎙️", "녹음"], ["🗣️", "화자 전사"], ["✨", "AI 요약"]];
+  const shownLines = stage === 0 ? DEMO_LINES.slice(0, line) : DEMO_LINES;
+
   return (
-    <div className="max-w-md">
-      <h2 className="text-3xl font-bold leading-snug text-slate-800">
-        회의는 <span className="text-teal-700">녹음</span>만 하세요.<br />
-        정리는 AI가 합니다.
-      </h2>
-      <p className="mt-3 text-sm leading-relaxed text-slate-500">
-        녹음·오디오 파일을 올리면 화자를 구분해 전사하고, 3줄 요약·아젠다·액션 아이템까지 자동으로 만들어
-        팀과 공유합니다. Notion·Dooray로 자동 전송도 됩니다.
-      </p>
+    <div className="flex flex-1 flex-col justify-center bg-slate-900 px-6 py-10 text-white sm:px-10">
+      <div className="mx-auto w-full max-w-md">
+        <div className="flex items-center gap-2">
+          <span className="text-2xl">📝</span>
+          <span className="font-bold">Meeting Minutes</span>
+        </div>
+        <h2 className="mt-5 text-3xl font-bold leading-snug">
+          회의는 <span className="text-teal-400">녹음</span>만 하세요.<br />정리는 AI가 합니다.
+        </h2>
+        <p className="mt-3 text-sm leading-relaxed text-slate-300">
+          화자를 구분해 전사하고 3줄 요약·아젠다·액션 아이템까지 자동으로. Notion·Dooray로 전송도 한 번에.
+        </p>
 
-      {/* 실시간 데모 카드 */}
-      <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-        <div className="flex items-center gap-2 text-xs font-semibold text-red-500">
-          <span className={`inline-block size-2 rounded-full bg-red-500 ${done ? "" : "animate-pulse"}`} />
-          {done ? "전사 완료 — AI 요약" : "회의 녹음 중… 실시간 전사"}
+        {/* 단계 탭 — 클릭하면 해당 단계로 바로 이동 */}
+        <div className="mt-6 flex gap-2">
+          {STEPS.map(([icon, label], i) => (
+            <button
+              key={label}
+              onClick={() => { setPlaying(false); jumpTo(i === 2 ? 2 : i); }}
+              className={`flex-1 rounded-xl border px-3 py-2 text-xs font-semibold transition ${
+                (stage === 2 ? 2 : stage) === i
+                  ? "border-teal-400 bg-teal-400/15 text-teal-300"
+                  : "border-white/15 text-slate-400 hover:border-white/30 hover:text-slate-200"
+              }`}
+            >
+              {icon} {label}
+            </button>
+          ))}
         </div>
 
-        <div className="mt-3 space-y-1.5 text-sm">
-          {DEMO.slice(0, step).map((d, i) => (
-            <p key={i} className="text-slate-600">
-              <span className="mr-1.5 font-semibold text-teal-700">{d.s}</span>{d.t}
-            </p>
-          ))}
-          {!done && (
-            <p className="text-slate-600">
-              <span className="mr-1.5 font-semibold text-teal-700">{DEMO[step].s}</span>
-              {typed}
-              <span className="ml-0.5 inline-block h-4 w-px animate-pulse bg-slate-400 align-middle" />
-            </p>
+        {/* 데모 카드 */}
+        <div className="mt-3 min-h-64 rounded-2xl border border-white/10 bg-white/5 p-5 backdrop-blur">
+          <div className="flex items-center gap-2 text-xs font-semibold">
+            <span className={`inline-block size-2 rounded-full ${stage === 0 ? "animate-pulse bg-red-400" : "bg-teal-400"}`} />
+            <span className={stage === 0 ? "text-red-300" : "text-teal-300"}>
+              {stage === 0 ? "녹음 중 · 실시간 전사" : stage === 1 ? "전사 완료 — 화자 3명" : "AI 요약 완료"}
+            </span>
+            {stage === 0 && (
+              <span className="ml-1 flex h-3 items-end gap-0.5">
+                {[0.6, 1, 0.75, 0.45].map((k, i) => (
+                  <span key={i} className="w-0.5 rounded-sm bg-red-400/80 transition-all duration-150"
+                    style={{ height: `${Math.max(15, level * k * 100)}%` }} />
+                ))}
+              </span>
+            )}
+            <button
+              onClick={() => setPlaying((p) => !p)}
+              title={playing ? "일시정지" : "재생"}
+              className="ml-auto rounded-md px-1.5 py-0.5 text-slate-400 hover:bg-white/10 hover:text-white"
+            >
+              {playing ? "⏸" : "▶"}
+            </button>
+          </div>
+
+          <div className="mt-3 space-y-1.5 text-sm">
+            {shownLines.map((d, i) => (
+              <p key={i} className="text-slate-200">
+                <span className="mr-1.5 font-semibold text-teal-400">{d.s}</span>{d.t}
+              </p>
+            ))}
+            {stage === 0 && (
+              <p className="text-slate-200">
+                <span className="mr-1.5 font-semibold text-teal-400">{DEMO_LINES[line].s}</span>
+                {typed}
+                <span className="ml-0.5 inline-block h-4 w-px animate-pulse bg-slate-300 align-middle" />
+              </p>
+            )}
+          </div>
+
+          {stage === 2 && (
+            <div className="mt-4 space-y-3 border-t border-white/10 pt-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">3줄 요약</p>
+                {DEMO_RESULT.summary.map((s, i) => (
+                  <p key={i} className="mt-1 text-sm text-slate-200">· {s}</p>
+                ))}
+              </div>
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">액션 아이템</p>
+                {DEMO_RESULT.actions.map((a) => (
+                  <p key={a.task} className="mt-1 flex items-center gap-2 text-sm text-slate-200">
+                    <span className="inline-block size-3.5 shrink-0 rounded border border-teal-400" />
+                    {a.task}
+                    <span className="text-xs text-slate-400">👤 {a.who} · 📅 {a.due}</span>
+                  </p>
+                ))}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {DEMO_RESULT.tags.map((t) => (
+                  <span key={t} className="rounded-full bg-teal-400/15 px-2.5 py-0.5 text-xs text-teal-300">{t}</span>
+                ))}
+              </div>
+            </div>
           )}
         </div>
 
-        {done && (
-          <div className="mt-4 space-y-2 border-t border-slate-100 pt-3">
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">3줄 요약</p>
-            <p className="text-sm text-slate-700">{RESULT.summary}</p>
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">액션 아이템</p>
-            <p className="flex items-center gap-2 text-sm text-slate-700">
-              <span className="inline-block size-3.5 rounded border border-teal-500" />
-              {RESULT.action}
-            </p>
-          </div>
-        )}
+        <ul className="mt-5 flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-slate-400">
+          {["🎙️ 앱 내 녹음·긴 파일 분할 전사", "🔒 원문 암호화 저장", "📝 Notion · 📋 Dooray 연동"].map((f) => (
+            <li key={f}>{f}</li>
+          ))}
+        </ul>
       </div>
-
-      <ul className="mt-5 flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-slate-500">
-        {["🎙️ 앱 내 녹음·긴 파일 분할 전사", "🗣️ 화자 분리", "🔒 원문 암호화 저장", "📝 Notion · 📋 Dooray 연동"].map((f) => (
-          <li key={f}>{f}</li>
-        ))}
-      </ul>
     </div>
   );
 }
+
 
 /* ── 설정: 요약 제공자(Gemini/로컬) + 전사(Gemini) ─────────── */
 const INPUT_CLS =
@@ -3972,12 +4077,18 @@ function Detail({ id, onBack, projects, me, settings }) {
         <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
           <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-400">주요 아젠다</h3>
           <div className="mt-4 space-y-4">
-            {m.agenda.map((a, i) => (
-              <div key={i} className="border-l-2 border-teal-300 pl-4">
-                <h4 className="font-semibold text-slate-800">{a.topic}</h4>
-                <p className="mt-1 text-sm leading-relaxed text-slate-600">{a.discussion}</p>
-              </div>
-            ))}
+            {m.agenda.map((a, i) => {
+              const c = splitCategory(a.topic);
+              return (
+                <div key={i} className="border-l-2 border-teal-300 pl-4">
+                  <h4 className="font-semibold text-slate-800">
+                    {c.cat && <CatTag>{c.cat}</CatTag>}
+                    {c.rest}
+                  </h4>
+                  <p className="mt-1 text-sm leading-relaxed text-slate-600">{a.discussion}</p>
+                </div>
+              );
+            })}
           </div>
         </section>
       )}
@@ -3997,7 +4108,8 @@ function Detail({ id, onBack, projects, me, settings }) {
                   className="mt-0.5 size-4 accent-teal-700 disabled:opacity-50" />
                 <div className="min-w-0">
                   <p className={`text-sm ${a.done ? "text-slate-400 line-through" : "text-slate-700"}`}>
-                    {a.task}
+                    {splitCategory(a.task).cat && <CatTag>{splitCategory(a.task).cat}</CatTag>}
+                    {splitCategory(a.task).rest}
                   </p>
                   <p className="mt-0.5 text-xs text-slate-400">
                     {a.assignee && <span className="mr-3">👤 {a.assignee}</span>}
