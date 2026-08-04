@@ -3010,17 +3010,26 @@ function ActionItems({ onOpenMeeting, projects, projectFilter, setProjectFilter 
   const [q, setQ] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
+  // 한 번에 볼 개수 — 회의록 목록과 동일한 방식(선택 기억)
+  const [pageSize, setPageSize] = useState(() => localStorage.getItem("action_page_size") ?? "20");
+  const changePageSize = (v) => {
+    setPageSize(v);
+    localStorage.setItem("action_page_size", v);
+  };
 
   useEffect(() => {
     const t = setTimeout(
       () =>
-        api(`/api/action-items?q=${encodeURIComponent(q)}&from=${from}&to=${to}&project=${projectFilter}`)
+        api(
+          `/api/action-items?q=${encodeURIComponent(q)}&from=${from}&to=${to}&project=${projectFilter}` +
+            (pageSize === "all" ? "" : `&limit=${pageSize}`),
+        )
           .then(setItems)
           .catch(console.error),
       q ? 300 : 0,
     );
     return () => clearTimeout(t);
-  }, [q, from, to, projectFilter]);
+  }, [q, from, to, projectFilter, pageSize]);
 
   const toggle = async (item) => {
     setItems((p) => p.map((a) => (a.id === item.id ? { ...a, done: !a.done } : a)));
@@ -3047,7 +3056,19 @@ function ActionItems({ onOpenMeeting, projects, projectFilter, setProjectFilter 
             className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-600 shadow-sm outline-none focus:border-teal-500 sm:flex-none" />
         </div>
         <ProjectSelect projects={projects} value={projectFilter} onChange={setProjectFilter} />
+        <select value={pageSize} onChange={(e) => changePageSize(e.target.value)} title="한 번에 볼 액션 아이템 개수"
+          className="rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-600 shadow-sm outline-none focus:border-teal-500">
+          {[["20", "20개"], ["50", "50개"], ["100", "100개"], ["all", "전체"]].map(([v, label]) => (
+            <option key={v} value={v}>{label}</option>
+          ))}
+        </select>
       </div>
+
+      {items !== null && pageSize !== "all" && items.length >= Number(pageSize) && (
+        <p className="rounded-xl bg-slate-100 px-4 py-2 text-xs text-slate-500">
+          최근 {pageSize}개만 표시 중입니다 — 더 보려면 위에서 개수를 늘리거나 검색·필터를 사용하세요.
+        </p>
+      )}
 
       {items === null ? (
         <p className="py-16 text-center text-sm text-slate-400">불러오는 중…</p>

@@ -1,7 +1,7 @@
 import { sql } from "../_db.js";
 import { wrap } from "../_wrap.js";
 import { requireAuth, encryptText, decryptText, decryptSecret } from "../_auth.js";
-import { pushToNotion, archiveNotionPage, extractNotionId } from "../_notion.js";
+import { pushToNotion, extractNotionId } from "../_notion.js";
 import { resolveProjectId, seeCond, editCond } from "../meetings.js";
 import { logAct, tryRecord } from "../_log.js";
 
@@ -89,14 +89,14 @@ export default wrap(async function handler(req, res) {
           const nowTarget = extractNotionId(target.id);
           // 대상이 바뀌었으면 옛 페이지(다른 테이블)는 그대로 두고 새 대상에 생성
           const targetChanged = !!meeting.notion_target_sent && meeting.notion_target_sent !== nowTarget;
-          if (meeting.notion_page_id && !targetChanged) await archiveNotionPage(token, meeting.notion_page_id);
-          const { url, pageId } = await pushToNotion(
+          const { url, pageId, updated } = await pushToNotion(
             { token, targetId: target.id, targetType: target.type },
             {
               title, text,
               summary: summary ?? [], agenda: agenda ?? [], action_items: items, tags: tags ?? [],
               project: proj?.name ?? null, meetingId: id, createdAt: meeting.created_at,
             },
+            targetChanged ? null : meeting.notion_page_id,
           );
           await tryRecord(
             () => sql`
@@ -105,9 +105,9 @@ export default wrap(async function handler(req, res) {
               WHERE id = ${id}`,
             userId, "Notion 전송 이력",
           );
-          integrations.notion = { ok: true, url, updated: !targetChanged, movedTarget: targetChanged };
+          integrations.notion = { ok: true, url, updated, movedTarget: targetChanged };
           await logAct(userId, "notion_sync",
-            `#${id} ${title} (수정 반영 — ${targetChanged ? "대상 변경, 새 테이블로 전송" : "교체"})${url ? ` → ${url}` : ""}`);
+            `#${id} ${title} (수정 반영 — ${targetChanged ? "대상 변경, 새 테이블로 전송" : updated ? "기존 페이지 업데이트" : "새 페이지 생성"})${url ? ` → ${url}` : ""}`);
         }
       }
     } catch (e) {

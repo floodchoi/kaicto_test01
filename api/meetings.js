@@ -85,6 +85,7 @@ export default wrap(async function handler(req, res) {
       const notionTarget = projectNotion ?? (cfg?.notion_target_id ? { id: cfg.notion_target_id, type: cfg.notion_target_type ?? "database" } : null);
       if (wantNotion && cfg?.notion_token_enc && notionTarget) {
         try {
+          // 새 회의록이지만, 같은 회의록 ID의 행이 이미 있으면 pushToNotion이 그 행을 업데이트한다
           const { url, pageId } = await pushToNotion(
             { token: decryptSecret(cfg.notion_token_enc), targetId: notionTarget.id, targetType: notionTarget.type },
             meetingData,

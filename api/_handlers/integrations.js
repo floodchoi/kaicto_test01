@@ -1,7 +1,7 @@
 import { sql } from "../_db.js";
 import { wrap } from "../_wrap.js";
 import { requireAuth, decryptSecret, decryptText } from "../_auth.js";
-import { testNotion, testNotionToken, pushToNotion, archiveNotionPage, extractNotionId } from "../_notion.js";
+import { testNotion, testNotionToken, pushToNotion, extractNotionId } from "../_notion.js";
 import { testDooray, testDoorayToken, pushTasksToDooray, pushWikiToDooray } from "../_dooray.js";
 import { editCond } from "../meetings.js";
 import { logAct, tryRecord } from "../_log.js";
@@ -78,13 +78,13 @@ export default wrap(async function handler(req, res) {
       else {
         try {
           const token = decryptSecret(u.notion_token_enc);
-          // 같은 대상에 다시 보낼 때만 기존 페이지를 보관 처리 = 중복 없이 교체(업데이트)
-          if (m.notion_page_id && !targetChanged) await archiveNotionPage(token, m.notion_page_id);
-          const { url, pageId } = await pushToNotion(
+          // 같은 대상이면 기존 페이지를 그대로 업데이트, 대상이 바뀌었으면 새 대상에 생성
+          const { url, pageId, updated } = await pushToNotion(
             { token, targetId: notionTarget.id, targetType: notionTarget.type },
             data,
+            targetChanged ? null : m.notion_page_id,
           );
-          out.notion = { ok: true, url, updated: !!m.notion_page_id && !targetChanged, movedTarget: targetChanged };
+          out.notion = { ok: true, url, updated, movedTarget: targetChanged };
           await tryRecord(
             () => sql`
               UPDATE meetings SET notion_synced_at = now(), notion_page_id = ${pageId},
@@ -93,7 +93,7 @@ export default wrap(async function handler(req, res) {
             userId, "Notion 전송 이력",
           );
           await logAct(userId, "notion_sync",
-            `#${m.id} ${m.title}${label}${targetChanged ? " (대상 변경 — 새 테이블로 전송)" : m.notion_page_id ? " (교체)" : ""}${url ? ` → ${url}` : ""}`);
+            `#${m.id} ${m.title}${label}${targetChanged ? " (대상 변경 — 새 테이블로 전송)" : updated ? " (기존 페이지 업데이트)" : ""}${url ? ` → ${url}` : ""}`);
         } catch (e) {
           out.notion = { ok: false, error: e.message };
           await logAct(userId, "notion_error", `#${m.id}${label} ${e.message}`);

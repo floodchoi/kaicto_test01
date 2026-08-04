@@ -110,24 +110,77 @@ export async function testNotion({ token, targetId, targetType }) {
   );
 }
 
-// 회의록을 Notion에 저장 — DB면 행 추가(제목/태그/날짜 속성 자동 매핑), 페이지면 하위 페이지 생성
-export async function pushToNotion({ token, targetId, targetType }, meeting) {
+// 페이지의 기존 본문 블록을 모두 지우고 새 블록으로 교체 (같은 페이지를 유지한 채 내용만 갱신)
+async function replaceChildren(token, pageId, children) {
+  const listRes = await fetch(`${BASE}/v1/blocks/${pageId}/children?page_size=100`, { headers: headers(token) });
+  if (listRes.ok) {
+    const old = (await listRes.json().catch(() => ({})))?.results ?? [];
+    for (const b of old) {
+      await fetch(`${BASE}/v1/blocks/${b.id}`, { method: "DELETE", headers: headers(token) }).catch(() => {});
+    }
+  }
+  // 한 번에 100블록까지 — buildBlocks가 이미 100 이하로 잘라서 넘긴다
+  const res = await fetch(`${BASE}/v1/blocks/${pageId}/children`, {
+    method: "PATCH",
+    headers: headers(token),
+    body: JSON.stringify({ children }),
+  });
+  if (!res.ok) {
+    const msg = (await res.json().catch(() => ({}))).message ?? `HTTP ${res.status}`;
+    throw new Error(`본문 갱신 실패: ${msg}`);
+  }
+}
+
+// 대상 DB에서 같은 회의록 ID를 가진 기존 페이지를 찾는다 (페이지 ID 기록이 없거나 유실된 경우 대비).
+// ID 속성이 없는 DB면 null — 이 경우 중복 방지는 저장된 page_id에만 의존한다.
+async function findPageByMeetingId(token, dbId, props, meetingId) {
+  const key = Object.keys(props).find((k) => /회의록\s*id|meeting\s*id|^id$/i.test(k.trim()));
+  const type = key && props[key].type;
+  if (!key || (type !== "rich_text" && type !== "number")) return null;
+  const filter =
+    type === "number"
+      ? { property: key, number: { equals: Number(meetingId) } }
+      : { property: key, rich_text: { equals: "MM-" + meetingId } };
+  const res = await fetch(`${BASE}/v1/databases/${dbId}/query`, {
+    method: "POST",
+    headers: headers(token),
+    body: JSON.stringify({ filter, page_size: 1 }),
+  });
+  if (!res.ok) return null;
+  const found = (await res.json().catch(() => ({})))?.results?.[0];
+  return found && !found.archived ? found.id : null;
+}
+
+// 페이지가 지금 대상 DB에 살아 있는지 확인 (대상이 바뀌었거나 삭제됐으면 새로 만들어야 함)
+async function pageUsable(token, pageId, dbId) {
+  const res = await fetch(`${BASE}/v1/pages/${pageId}`, { headers: headers(token) });
+  if (!res.ok) return false;
+  const p = await res.json().catch(() => ({}));
+  if (p.archived || p.in_trash) return false;
+  if (!dbId) return true; // 페이지 하위 저장 방식
+  return extractNotionId(p.parent?.database_id ?? "") === dbId;
+}
+
+// 회의록을 Notion에 저장 — 기존 페이지가 있으면 그 페이지를 업데이트(중복 생성 없음),
+// 없으면 새로 생성. DB면 제목/태그/날짜/프로젝트/ID 속성을 자동 매핑, 페이지면 하위 페이지.
+export async function pushToNotion({ token, targetId, targetType }, meeting, existingPageId) {
   const id = extractNotionId(targetId);
   const children = buildBlocks(meeting);
   let body;
+  let properties;
+  let pageToUpdate = null;
+
   if (targetType === "page") {
-    body = {
-      parent: { page_id: id },
-      properties: { title: { title: rt(meeting.title) } },
-      children,
-    };
+    if (existingPageId && (await pageUsable(token, existingPageId, null))) pageToUpdate = existingPageId;
+    properties = { title: { title: rt(meeting.title) } };
+    body = { parent: { page_id: id }, properties, children };
   } else {
     // DB 스키마를 조회해 제목·태그(multi_select)·날짜(date) 속성 이름을 자동 탐색
     const dbRes = await fetch(`${BASE}/v1/databases/${id}`, { headers: headers(token) });
     if (!dbRes.ok) throw new Error(`데이터베이스 조회 실패 (HTTP ${dbRes.status})`);
     const props = (await dbRes.json()).properties ?? {};
     const findProp = (type) => Object.keys(props).find((k) => props[k].type === type);
-    const properties = { [findProp("title") ?? "Name"]: { title: rt(meeting.title) } };
+    properties = { [findProp("title") ?? "Name"]: { title: rt(meeting.title) } };
     const tagProp = findProp("multi_select");
     if (tagProp && meeting.tags?.length)
       properties[tagProp] = {
@@ -163,7 +216,29 @@ export async function pushToNotion({ token, targetId, targetType }, meeting) {
       else if (t === "rich_text") properties[key] = { rich_text: rt("MM-" + meeting.meetingId) };
     }
     body = { parent: { database_id: id }, properties, children };
+
+    // 업데이트할 기존 페이지 찾기: 저장된 page_id가 이 DB에 살아 있으면 그것을,
+    // 없으면 같은 회의록 ID를 가진 행을 찾아 재사용 (중복 행 생성 방지)
+    if (existingPageId && (await pageUsable(token, existingPageId, id))) pageToUpdate = existingPageId;
+    else if (meeting.meetingId != null) pageToUpdate = await findPageByMeetingId(token, id, props, meeting.meetingId);
   }
+
+  // 기존 페이지가 있으면 속성 + 본문을 갱신 (새 페이지를 만들지 않는다)
+  if (pageToUpdate) {
+    const upd = await fetch(`${BASE}/v1/pages/${pageToUpdate}`, {
+      method: "PATCH",
+      headers: headers(token),
+      body: JSON.stringify({ properties }),
+    });
+    if (!upd.ok) {
+      const msg = (await upd.json().catch(() => ({}))).message ?? `HTTP ${upd.status}`;
+      throw new Error(`페이지 속성 갱신 실패: ${msg}`);
+    }
+    await replaceChildren(token, pageToUpdate, children);
+    const page = await upd.json().catch(() => ({}));
+    return { url: page.url ?? null, pageId: pageToUpdate, updated: true };
+  }
+
   const res = await fetch(`${BASE}/v1/pages`, {
     method: "POST",
     headers: headers(token),
@@ -174,19 +249,5 @@ export async function pushToNotion({ token, targetId, targetType }, meeting) {
     throw new Error(msg);
   }
   const created = await res.json();
-  return { url: created.url ?? null, pageId: created.id ?? null };
-}
-
-// 기존 페이지 보관(휴지통) 처리 — 수정 재전송 시 중복 대신 교체하기 위해 사용.
-// 실패해도(이미 삭제됨 등) 새 페이지 생성은 계속한다.
-export async function archiveNotionPage(token, pageId) {
-  try {
-    await fetch(`${BASE}/v1/pages/${pageId}`, {
-      method: "PATCH",
-      headers: headers(token),
-      body: JSON.stringify({ archived: true }),
-    });
-  } catch {
-    /* 무시 */
-  }
+  return { url: created.url ?? null, pageId: created.id ?? null, updated: false };
 }

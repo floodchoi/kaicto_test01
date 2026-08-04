@@ -5,7 +5,7 @@ import { editCond } from "./meetings.js";
 
 const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
 
-// GET /api/action-items?q=&from=&to=&project= — 내 회의록 + 내가 멤버인 프로젝트 회의록의 액션 아이템
+// GET /api/action-items?q=&from=&to=&project=&limit= — 내 회의록 + 내가 멤버인 프로젝트 회의록의 액션 아이템
 // (공개 회의록의 항목은 해당 회의록 상세에서 열람 — 여기는 내 할 일 관리 용도)
 export default wrap(async function handler(req, res) {
   const userId = requireAuth(req, res);
@@ -16,6 +16,8 @@ export default wrap(async function handler(req, res) {
   const from = (req.query.from ?? "").trim();
   const to = (req.query.to ?? "").trim();
   const project = (req.query.project ?? "").trim(); // ""=전체, "none"=미분류, 숫자=해당 프로젝트
+  const limitRaw = Number(req.query.limit); // 미지정·비정상 = 전체
+  const limit = Number.isInteger(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 1000) : null;
 
   const rows = await sql`
     SELECT a.id, a.meeting_id, a.task, a.assignee, a.due_date, a.done,
@@ -28,7 +30,8 @@ export default wrap(async function handler(req, res) {
     ${isDate(from) ? sql`AND m.created_at >= ${from}::date` : sql``}
     ${isDate(to) ? sql`AND m.created_at < ${to}::date + 1` : sql``}
     ${project === "none" ? sql`AND m.project_id IS NULL` : /^\d+$/.test(project) ? sql`AND m.project_id = ${Number(project)}` : sql``}
-    ORDER BY a.done ASC, m.created_at DESC, a.id`;
+    ORDER BY a.done ASC, m.created_at DESC, a.id
+    ${limit ? sql`LIMIT ${limit}` : sql``}`;
 
   res.status(200).json(rows);
 });
