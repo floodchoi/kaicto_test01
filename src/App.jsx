@@ -99,11 +99,15 @@ async function api(path, opts) {
 const MAX_AUDIO_BYTES = 500 * 1024 * 1024;
 const BIG_AUDIO_BYTES = 100 * 1024 * 1024; // 이보다 크면 분할 준비가 오래 걸린다고 안내
 
+// ⚠️ m4a는 MP4 컨테이너(안에 AAC) — audio/aac로 보내면 Gemini가 파싱하지 못한다.
+// 아래 컨테이너들은 통짜 전송 전에 WAV로 변환하는 것이 안전(NEEDS_WAV 참고).
 const AUDIO_MIME = {
-  aac: "audio/aac", m4a: "audio/aac", mp3: "audio/mp3",
+  aac: "audio/aac", m4a: "audio/mp4", mp4: "audio/mp4", mp3: "audio/mp3",
   wav: "audio/wav", ogg: "audio/ogg", flac: "audio/flac", aiff: "audio/aiff",
   webm: "audio/webm", // 브라우저 녹음 컨테이너 — 통짜 전사 시 WAV로 변환됨
 };
+// Gemini가 그대로 받기 어려운 컨테이너 — 통짜 전송 시 브라우저에서 WAV로 변환
+const NEEDS_WAV = /\.(webm|m4a|mp4|aac)$/i;
 const mimeFor = (file) =>
   AUDIO_MIME[file.name.split(".").pop().toLowerCase()] ?? file.type ?? "audio/aac";
 
@@ -4671,11 +4675,16 @@ export default function App() {
         // OpenAI는 25MB 제한이 있어 큰 파일도 WAV(16kHz 모노)로 축소
         let sendFile = audioFile;
         if (
-          /webm/i.test(audioFile.type) || /\.webm$/i.test(audioFile.name) ||
+          /webm|mp4|m4a|aac/i.test(audioFile.type) || NEEDS_WAV.test(audioFile.name) ||
           (sttProvider === "openai" && audioFile.size > 24 * 1024 * 1024)
         ) {
           setStage("오디오 변환 중…");
-          sendFile = await toWavFile(audioFile);
+          // 변환 실패(특이 코덱 등) 시엔 원본을 그대로 보내 최소한 시도는 하게 둔다
+          try {
+            sendFile = await toWavFile(audioFile);
+          } catch (e) {
+            console.warn("WAV 변환 실패 — 원본 그대로 전송:", e.message);
+          }
         }
         if (/wav/i.test(sendFile.type) || /\.wav$/i.test(sendFile.name))
           audioSecs = Math.round(sendFile.size / 32000);
