@@ -1419,9 +1419,11 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
           <div className="mt-2 flex gap-2">
             {[["gemini", "Gemini"], ["openai", "GPT (OpenAI)"], ["local", "로컬 LLM"]].map(([v, label]) => (
               <button key={v} onClick={() => setSummaryProvider(v)}
+                disabled={locked && v !== "gemini"}
+                title={locked && v !== "gemini" ? "관리자 키 사용 중에는 관리자가 지정한 Gemini 모델만 사용할 수 있습니다" : ""}
                 className={`flex-1 rounded-xl border px-3 py-2 text-sm font-medium ${
                   summaryProvider === v ? "border-teal-500 bg-teal-50 text-teal-700" : "border-slate-200 text-slate-500"
-                }`}>
+                } disabled:cursor-not-allowed disabled:opacity-40`}>
                 {label}
               </button>
             ))}
@@ -1488,9 +1490,11 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
           <div className="mt-2 flex gap-2">
             {[["gemini", "Gemini"], ["openai", "GPT (OpenAI)"]].map(([v, label]) => (
               <button key={v} onClick={() => setSttProvider(v)}
+                disabled={locked && v !== "gemini"}
+                title={locked && v !== "gemini" ? "관리자 키 사용 중에는 관리자가 지정한 Gemini 모델만 사용할 수 있습니다" : ""}
                 className={`flex-1 rounded-xl border px-3 py-2 text-sm font-medium ${
                   sttProvider === v ? "border-teal-500 bg-teal-50 text-teal-700" : "border-slate-200 text-slate-500"
-                }`}>
+                } disabled:cursor-not-allowed disabled:opacity-40`}>
                 {label}
               </button>
             ))}
@@ -1515,8 +1519,13 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
                 기본은 위 Gemini 키/요약 모델을 그대로 사용합니다. 전사만 다른 키/모델을 쓰려면 아래에 입력하세요.
               </p>
               <label className="mt-3 block text-sm font-medium text-slate-700">전사용 API 키 (선택)</label>
-              <input type="password" value={sttApiKey} onChange={(e) => setSttApiKey(e.target.value)}
-                placeholder="비워두면 위 Gemini 키 사용" className={INPUT_CLS} />
+              {locked ? (
+                <input disabled placeholder="관리자 키 사용 중 — 전사도 관리자 키·모델로 고정됩니다"
+                  className={INPUT_CLS + " bg-slate-50 text-slate-400"} />
+              ) : (
+                <input type="password" value={sttApiKey} onChange={(e) => setSttApiKey(e.target.value)}
+                  placeholder="비워두면 위 Gemini 키 사용" className={INPUT_CLS} />
+              )}
 
               <label className="mt-4 block text-sm font-medium text-slate-700">전사용 모델 (선택)</label>
               {locked ? (
@@ -2394,8 +2403,9 @@ function Help({ onClose }) {
           <h3 className={h}>LLM 연결 방법</h3>
           <p className={p}>
             · <b>Gemini API</b>: ⚙️ 설정 → Google AI Studio에서 키 발급 → 붙여넣고 저장. 관리자가 허용한
-            회원은 본인 키 없이 <b>관리자 키</b>를 사용할 수 있습니다 — 이 경우 모델은 관리자가 지정한
-            모델로 고정됩니다. 무료 키와 <b>유료(예비) 키</b>를 함께 등록하면 무료 한도 소진 시
+            회원은 본인 키 없이 <b>관리자 키</b>를 사용할 수 있습니다 — 이 경우 <b>전사·요약 모두</b>
+            관리자가 지정한 Gemini 모델로 고정되며, 다른 제공자(GPT·로컬 LLM)나 별도 전사 키로
+            바꿀 수 없습니다. 무료 키와 <b>유료(예비) 키</b>를 함께 등록하면 무료 한도 소진 시
             자동으로 유료 키로 전환됩니다.<br />
             · <b>로컬 LLM(요약)</b>: Ollama·LM Studio 등을 이 PC에서 실행 → ⚙️ 설정 → 요약 제공자
             "로컬 LLM" → 서버 주소(예: LM Studio <code>http://localhost:1234/v1</code>) 입력 →
@@ -3800,7 +3810,8 @@ export default function App() {
         localStorage.removeItem("gemini_api_key");
       }
       setMe(m);
-      // 관리자 키 사용자는 관리자가 지정한 모델로 고정 (지정 전에는 자유 선택)
+      // 관리자 키 사용자는 전사·요약 모두 관리자가 지정한 모델로 고정 (지정 전에는 자유 선택).
+      // 제공자도 Gemini로 강제 — 로컬/GPT 제공자나 전사 전용 키로 우회할 수 없게.
       setSettings((p) => ({
         ...p,
         apiKey: m.gemini_key,
@@ -3808,6 +3819,9 @@ export default function App() {
         ...(m.using_admin_key && m.admin_model && {
           model: m.admin_model,
           sttModel: m.admin_stt_model ?? "",
+          summaryProvider: "gemini",
+          sttProvider: "gemini",
+          sttApiKey: "",
         }),
       }));
     } catch (e) {
