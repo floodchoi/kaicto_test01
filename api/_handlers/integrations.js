@@ -4,7 +4,7 @@ import { requireAuth, decryptSecret, decryptText } from "../_auth.js";
 import { testNotion, testNotionToken, pushToNotion, archiveNotionPage, extractNotionId } from "../_notion.js";
 import { testDooray, testDoorayToken, pushTasksToDooray, pushWikiToDooray } from "../_dooray.js";
 import { editCond } from "../meetings.js";
-import { logAct } from "../_log.js";
+import { logAct, tryRecord } from "../_log.js";
 
 // POST /api/integrations
 //  { action: "notion_test" | "dooray_test" }   → 연결 확인 (설정 화면의 [연결 테스트])
@@ -85,10 +85,13 @@ export default wrap(async function handler(req, res) {
             data,
           );
           out.notion = { ok: true, url, updated: !!m.notion_page_id && !targetChanged, movedTarget: targetChanged };
-          await sql`
-            UPDATE meetings SET notion_synced_at = now(), notion_page_id = ${pageId},
-                   notion_target_sent = ${nowTarget}
-            WHERE id = ${m.id}`;
+          await tryRecord(
+            () => sql`
+              UPDATE meetings SET notion_synced_at = now(), notion_page_id = ${pageId},
+                     notion_target_sent = ${nowTarget}
+              WHERE id = ${m.id}`,
+            userId, "Notion 전송 이력",
+          );
           await logAct(userId, "notion_sync",
             `#${m.id} ${m.title}${label}${targetChanged ? " (대상 변경 — 새 테이블로 전송)" : m.notion_page_id ? " (교체)" : ""}${url ? ` → ${url}` : ""}`);
         } catch (e) {
@@ -107,9 +110,12 @@ export default wrap(async function handler(req, res) {
           let r = { created: 0, failed: 0 };
           if (data.action_items.length) r = await pushTasksToDooray(dcfg, data);
           out.dooray = { ok: true, wiki: true, movedTarget: doorayChanged, ...r };
-          await sql`
-            UPDATE meetings SET dooray_synced_at = now(), dooray_target_sent = ${String(doorayPid)}
-            WHERE id = ${m.id}`;
+          await tryRecord(
+            () => sql`
+              UPDATE meetings SET dooray_synced_at = now(), dooray_target_sent = ${String(doorayPid)}
+              WHERE id = ${m.id}`,
+            userId, "Dooray 전송 이력",
+          );
           await logAct(userId, "dooray_sync",
             `#${m.id} 위키 저장 + 업무 ${r.created}건${label}${doorayChanged ? " (대상 변경)" : ""} (프로젝트 ${doorayPid})`);
         } catch (e) {

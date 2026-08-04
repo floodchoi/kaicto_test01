@@ -1,7 +1,7 @@
 import { sql } from "./_db.js";
 import { wrap } from "./_wrap.js";
 import { requireAuth, encryptText, decryptSecret } from "./_auth.js";
-import { logAct } from "./_log.js";
+import { logAct, tryRecord } from "./_log.js";
 import { pushToNotion, extractNotionId } from "./_notion.js";
 import { pushTasksToDooray, pushWikiToDooray } from "./_dooray.js";
 
@@ -90,10 +90,14 @@ export default wrap(async function handler(req, res) {
             meetingData,
           );
           integrations.notion = { ok: true, url };
-          await sql`
-            UPDATE meetings SET notion_synced_at = now(), notion_page_id = ${pageId},
-                   notion_target_sent = ${extractNotionId(notionTarget.id)}
-            WHERE id = ${meeting.id}`;
+          // 기록 실패(마이그레이션 미실행 등)가 성공한 전송을 실패로 만들지 않게
+          await tryRecord(
+            () => sql`
+              UPDATE meetings SET notion_synced_at = now(), notion_page_id = ${pageId},
+                     notion_target_sent = ${extractNotionId(notionTarget.id)}
+              WHERE id = ${meeting.id}`,
+            userId, "Notion 전송 이력",
+          );
           await logAct(userId, "notion_sync", `#${meeting.id} ${title}${url ? ` → ${url}` : ""}`);
         } catch (e) {
           integrations.notion = { ok: false, error: e.message };
@@ -109,9 +113,12 @@ export default wrap(async function handler(req, res) {
           let r = { created: 0, failed: 0 };
           if (meetingData.action_items.length) r = await pushTasksToDooray(dcfg, meetingData); // 액션 아이템 → 업무
           integrations.dooray = { ok: true, wiki: true, ...r };
-          await sql`
-            UPDATE meetings SET dooray_synced_at = now(), dooray_target_sent = ${String(doorayPid)}
-            WHERE id = ${meeting.id}`;
+          await tryRecord(
+            () => sql`
+              UPDATE meetings SET dooray_synced_at = now(), dooray_target_sent = ${String(doorayPid)}
+              WHERE id = ${meeting.id}`,
+            userId, "Dooray 전송 이력",
+          );
           await logAct(userId, "dooray_sync", `#${meeting.id} 위키 저장 + 업무 ${r.created}건 (프로젝트 ${doorayPid})`);
         } catch (e) {
           integrations.dooray = { ok: false, error: e.message };
