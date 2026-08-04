@@ -2004,6 +2004,7 @@ function ProjectMembers({ p, onChanged }) {
   const candidates = results.filter((u) => !memberIds.has(u.id));
   return (
     <div className="mb-1.5 ml-6 rounded-lg bg-slate-50 p-3">
+      <p className="mb-2 text-xs font-semibold text-slate-600">👤 멤버</p>
       <div className="flex flex-wrap gap-1.5">
         {(p.members ?? []).length === 0 && <span className="text-xs text-slate-400">지정된 멤버가 없습니다.</span>}
         {(p.members ?? []).map((mem) => (
@@ -2128,7 +2129,7 @@ function ProjectManager({ me, projects, onChanged, onClose, loadError }) {
         <h2 className="text-lg font-bold text-slate-800">프로젝트 관리</h2>
         <p className="mt-1 text-xs text-slate-500">
           개인 프로젝트는 나만 사용합니다. 👥 공유 프로젝트(관리자 생성)는 모든 회원이 지정할 수 있습니다.
-          <b> 👤 멤버</b>를 지정하면 그 회원이 프로젝트의 회의록을 함께 보고 수정할 수 있습니다.
+          각 프로젝트의 <b>⚙️ 설정</b>에서 멤버(함께 보고 수정할 회원)와 Notion·Dooray 저장 위치를 지정합니다.
         </p>
 
         <div className="mt-4 flex gap-2">
@@ -2161,13 +2162,16 @@ function ProjectManager({ me, projects, onChanged, onClose, loadError }) {
                   <span className="min-w-0 flex-1 truncate text-slate-700">
                     {p.is_shared ? "👥 " : "📁 "}{p.name}
                     <span className="ml-2 text-xs text-slate-400">회의록 {p.meeting_count}개</span>
+                    {(p.members ?? []).length > 0 && (
+                      <span className="ml-2 text-xs text-slate-400">· 멤버 {p.members.length}명</span>
+                    )}
                     {p.is_member && <span className="ml-2 text-xs text-teal-600">멤버로 참여 중</span>}
                   </span>
                   {canManage && (
                     <button onClick={() => setMembersOpen(membersOpen === p.id ? null : p.id)}
-                      title="멤버 지정 — 함께 보고 수정할 회원"
-                      className={`text-xs font-medium hover:underline ${membersOpen === p.id ? "text-teal-700" : "text-slate-500"}`}>
-                      👤 멤버 {(p.members ?? []).length}
+                      title="프로젝트 설정 — 멤버 지정 · Notion/Dooray 저장 위치"
+                      className={`rounded-lg px-1.5 py-0.5 text-sm hover:bg-slate-100 ${membersOpen === p.id ? "text-teal-700" : "text-slate-400"}`}>
+                      ⚙️
                     </button>
                   )}
                   {canManage && (
