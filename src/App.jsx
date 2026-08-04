@@ -2083,10 +2083,10 @@ function ProjectMembers({ p, onChanged }) {
   );
 }
 
-function ProjectManager({ me, projects, onChanged, onClose }) {
+function ProjectManager({ me, projects, onChanged, onClose, loadError }) {
   const [name, setName] = useState("");
   const [shared, setShared] = useState(false);
-  const [error, setError] = useState(null);
+  const [error, setError] = useState(loadError ?? null);
   const [busy, setBusy] = useState(false);
   const [membersOpen, setMembersOpen] = useState(null); // 멤버 패널이 열린 프로젝트 id
 
@@ -4262,7 +4262,14 @@ export default function App() {
 
   // 프로젝트 목록 (내 것 + 공유) — 필터는 회의록/액션아이템 탭이 공유
   const [projects, setProjects] = useState([]);
-  const refreshProjects = () => api("/api/projects").then(setProjects).catch(() => {});
+  // 실패를 삼키지 않는다 — 스키마 미마이그레이션 등으로 목록이 안 뜨면 배너로 원인을 보여준다
+  const refreshProjects = () =>
+    api("/api/projects")
+      .then((rows) => {
+        setProjects(rows);
+        setMeError((e) => (e?.startsWith("프로젝트 목록") ? null : e));
+      })
+      .catch((e) => setMeError(`프로젝트 목록을 불러오지 못했습니다: ${e.message}`));
   const [projectFilter, setProjectFilter] = useState(""); // ""=전체, "none"=미분류, "숫자"=프로젝트
   const [showProjects, setShowProjects] = useState(false);
   useEffect(() => {
@@ -4967,6 +4974,7 @@ export default function App() {
           me={me}
           projects={projects}
           onChanged={refreshProjects}
+          loadError={meError?.startsWith("프로젝트 목록") ? meError : null}
           onClose={() => setShowProjects(false)}
         />
       )}
