@@ -1,7 +1,10 @@
 import { sql } from "../_db.js";
 import { wrap } from "../_wrap.js";
 import { requireAuth, decryptSecret, decryptText } from "../_auth.js";
-import { testNotion, testNotionToken, pushToNotion, extractNotionId } from "../_notion.js";
+import {
+  testNotion, testNotionToken, pushToNotion, extractNotionId,
+  findNotionDuplicates, archiveNotionPage,
+} from "../_notion.js";
 import { testDooray, testDoorayToken, pushTasksToDooray, pushWikiToDooray } from "../_dooray.js";
 import { editCond } from "../meetings.js";
 import { logAct, tryRecord } from "../_log.js";
@@ -164,6 +167,52 @@ export default wrap(async function handler(req, res) {
     await logAct(userId, "notion_sync", `일괄 전송: 성공 ${summary.sent} · 건너뜀 ${summary.skipped} · 실패 ${summary.failed}`);
     return res.status(200).json(summary);
   }
+  // 중복 정리: 같은 '회의록 ID'를 가진 행이 여러 개면 최신 1개만 남기고 나머지를 보관 처리.
+  // { dryRun: true }면 검사만 하고 아무것도 지우지 않는다. 대상은 지정 없으면 내 기본 테이블 +
+  // 내가 관리하는 프로젝트에 지정된 테이블 전부.
+  if (action === "notion_dedupe") {
+    if (!u?.notion_token_enc) return res.status(400).json({ error: "먼저 ⚙️ 설정에서 Notion 토큰을 저장해주세요." });
+    const token = decryptSecret(u.notion_token_enc);
+    const dryRun = req.body?.dryRun !== false;
+
+    let targets = [];
+    if (req.body?.targetId) targets = [String(req.body.targetId)];
+    else {
+      const pjs = await sql`
+        SELECT DISTINCT notion_target_id FROM projects
+        WHERE notion_target_id IS NOT NULL
+          AND (owner_id = ${userId}
+               OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = projects.id AND pm.user_id = ${userId}))`;
+      targets = [u.notion_target_id, ...pjs.map((r) => r.notion_target_id)].filter(Boolean);
+    }
+    targets = [...new Set(targets.map((t) => extractNotionId(t)))];
+    if (!targets.length) return res.status(400).json({ error: "정리할 Notion 테이블이 지정되어 있지 않습니다." });
+
+    const out = { dryRun, tables: 0, duplicateMeetings: 0, extraPages: 0, archived: 0, failed: 0, errors: [] };
+    for (const t of targets) {
+      try {
+        const { groups } = await findNotionDuplicates(token, t);
+        out.tables++;
+        for (const g of groups) {
+          out.duplicateMeetings++;
+          const [, ...extras] = g.pages; // 최신 1개(g.pages[0]) 유지, 나머지 정리 대상
+          out.extraPages += extras.length;
+          if (dryRun) continue;
+          for (const p of extras) {
+            if (await archiveNotionPage(token, p.id)) out.archived++;
+            else out.failed++;
+          }
+        }
+      } catch (e) {
+        out.errors.push(e.message);
+      }
+    }
+    if (!dryRun)
+      await logAct(userId, "notion_sync",
+        `중복 정리: 테이블 ${out.tables}개 · 중복 회의록 ${out.duplicateMeetings}건 · 보관 처리 ${out.archived}개${out.failed ? `, 실패 ${out.failed}` : ""}`);
+    return res.status(200).json(out);
+  }
+
   // 토큰만 검사 (대상과 무관)
   if (action === "notion_token_test") {
     if (!u?.notion_token_enc) return res.status(400).json({ error: "먼저 Notion 토큰을 저장해주세요." });

@@ -251,3 +251,62 @@ export async function pushToNotion({ token, targetId, targetType }, meeting, exi
   const created = await res.json();
   return { url: created.url ?? null, pageId: created.id ?? null, updated: false };
 }
+
+// 페이지 보관(휴지통) 처리 — 중복 정리에 사용. Notion에서 되돌릴 수 있다.
+export async function archiveNotionPage(token, pageId) {
+  const res = await fetch(`${BASE}/v1/pages/${pageId}`, {
+    method: "PATCH",
+    headers: headers(token),
+    body: JSON.stringify({ archived: true }),
+  });
+  return res.ok;
+}
+
+// 대상 DB에서 같은 '회의록 ID'를 가진 중복 행을 찾는다.
+// 반환: { key, groups: [{ meetingId, pages: [{id, url, lastEdited}] }] } — pages는 최신순
+export async function findNotionDuplicates(token, targetId) {
+  const id = extractNotionId(targetId);
+  const dbRes = await fetch(`${BASE}/v1/databases/${id}`, { headers: headers(token) });
+  if (!dbRes.ok) throw new Error(`데이터베이스 조회 실패 (HTTP ${dbRes.status})`);
+  const props = (await dbRes.json()).properties ?? {};
+  const key = Object.keys(props).find((k) => /회의록\s*id|meeting\s*id|^id$/i.test(k.trim()));
+  const type = key && props[key].type;
+  if (!key || (type !== "rich_text" && type !== "number"))
+    throw new Error(
+      "이 데이터베이스에는 '회의록 ID' 속성(텍스트 또는 숫자)이 없어 중복을 식별할 수 없습니다 — 속성을 추가하고 회의록을 다시 전송한 뒤 이용하세요.",
+    );
+
+  const byId = new Map();
+  let cursor;
+  for (let page = 0; page < 20; page++) { // 최대 2000행
+    const res = await fetch(`${BASE}/v1/databases/${id}/query`, {
+      method: "POST",
+      headers: headers(token),
+      body: JSON.stringify({ page_size: 100, ...(cursor && { start_cursor: cursor }) }),
+    });
+    if (!res.ok) throw new Error(`데이터베이스 조회 실패 (HTTP ${res.status})`);
+    const j = await res.json();
+    for (const p of j.results ?? []) {
+      if (p.archived || p.in_trash) continue;
+      const prop = p.properties?.[key];
+      const v =
+        type === "number"
+          ? prop?.number
+          : (prop?.rich_text ?? []).map((t) => t.plain_text ?? t.text?.content ?? "").join("").trim();
+      if (v === null || v === undefined || v === "") continue;
+      const k = String(v);
+      if (!byId.has(k)) byId.set(k, []);
+      byId.get(k).push({ id: p.id, url: p.url ?? null, lastEdited: p.last_edited_time ?? "" });
+    }
+    if (!j.has_more) break;
+    cursor = j.next_cursor;
+  }
+
+  const groups = [];
+  for (const [meetingId, pages] of byId) {
+    if (pages.length < 2) continue;
+    pages.sort((a, b) => String(b.lastEdited).localeCompare(String(a.lastEdited))); // 최신 먼저
+    groups.push({ meetingId, pages });
+  }
+  return { key, groups };
+}

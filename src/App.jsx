@@ -1411,7 +1411,12 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
   const [openaiSttModel, setOpenaiSttModel] = useState(settings.openaiSttModel ?? "gpt-4o-transcribe");
   const [openaiSumModel, setOpenaiSumModel] = useState(settings.openaiSumModel ?? "gpt-5.6-luna");
   // 관리자 키 사용자는 관리자가 지정한 모델로 고정
-  const locked = !!(me?.using_admin_key && me?.admin_model);
+  // 관리자 키를 쓰는 회원: 기본은 '관리자 설정 사용' 상태로 개인 API 설정이 모두 잠긴다.
+  // 아래 토글로 '개인 API 사용'을 켜야 직접 키·모델·제공자를 설정할 수 있다.
+  const onAdminKey = !!me?.can_use_admin_key && !me?.has_own_key;
+  const [useOwnApi, setUseOwnApi] = useState(false);
+  const adminLocked = onAdminKey && !useOwnApi; // 개인 API 설정 전체 비활성화
+  const locked = adminLocked && !!me?.admin_model; // 모델 표시는 관리자 지정값으로 고정
   // 관리자 전용: 관리자 키 사용자에게 강제할 공유 모델
   const [sharedModel, setSharedModel] = useState(me?.shared_model ?? "");
   const [sharedStt, setSharedStt] = useState(me?.shared_stt_model ?? "");
@@ -1422,6 +1427,44 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
   const [doorayToken, setDoorayToken] = useState("");
   const [doorayProject, setDoorayProject] = useState(me?.dooray_project_id ?? "");
   const [testMsg, setTestMsg] = useState("");
+  // 🧹 Notion 중복 정리 — 먼저 검사(dryRun)해서 확인을 받고, 승인 시 보관 처리
+  const [dedupeBusy, setDedupeBusy] = useState(false);
+  const [dedupeMsg, setDedupeMsg] = useState("");
+  const dedupeNotion = async () => {
+    setDedupeBusy(true);
+    setDedupeMsg("중복 검사 중… (테이블이 크면 시간이 걸립니다)");
+    try {
+      const scan = await api("/api/integrations", {
+        method: "POST",
+        body: JSON.stringify({ action: "notion_dedupe", dryRun: true }),
+      });
+      if (!scan.extraPages) {
+        setDedupeMsg(`✅ 중복 없음 — 테이블 ${scan.tables}개 검사 완료` + (scan.errors?.length ? ` (${scan.errors[0]})` : ""));
+        return;
+      }
+      if (
+        !confirm(
+          `중복 회의록 ${scan.duplicateMeetings}건에서 여분 ${scan.extraPages}개 페이지를 찾았습니다.\n` +
+            "각 회의록의 가장 최근 페이지만 남기고 나머지를 Notion 휴지통으로 보냅니다.\n(Notion에서 복원할 수 있습니다) 계속할까요?",
+        )
+      ) {
+        setDedupeMsg(`검사 결과: 중복 ${scan.duplicateMeetings}건 · 여분 페이지 ${scan.extraPages}개 (정리하지 않음)`);
+        return;
+      }
+      const r = await api("/api/integrations", {
+        method: "POST",
+        body: JSON.stringify({ action: "notion_dedupe", dryRun: false }),
+      });
+      setDedupeMsg(
+        `🧹 정리 완료 — 보관 처리 ${r.archived}개${r.failed ? ` · 실패 ${r.failed}개` : ""} (테이블 ${r.tables}개)` +
+          (r.errors?.length ? ` (${r.errors[0]})` : ""),
+      );
+    } catch (e) {
+      setDedupeMsg("⚠️ " + e.message);
+    } finally {
+      setDedupeBusy(false);
+    }
+  };
   const runTest = async (action) => {
     setTestMsg("연결 테스트 중…");
     try {
@@ -1484,6 +1527,11 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
   const [saveError, setSaveError] = useState(null);
 
   const save = async () => {
+    // 관리자 설정을 쓰는 동안에는 개인 키·제공자 변경을 저장하지 않는다(잠금 상태 유지)
+    if (adminLocked) {
+      onClose();
+      return;
+    }
     const next = {
       apiKey: apiKey.trim(),
       apiKey2: apiKey2.trim(),
@@ -1559,34 +1607,61 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
           모든 값은 이 브라우저에만 저장되며 서버에 보관되지 않습니다.
         </p>
 
+        {/* 관리자 키 사용 안내 + 개인 API 사용 전환 토글 */}
+        {onAdminKey && (
+          <div className="mt-4 rounded-xl border border-teal-200 bg-teal-50 p-3">
+            <p className="text-xs text-teal-800">
+              ✅ 이 계정은 <b>관리자의 API 키</b>를 사용하도록 설정되어 있습니다 — 키·모델·제공자를
+              따로 설정할 필요가 없고, 아래 개인 API 설정은 잠겨 있습니다.
+              {me?.admin_model && (
+                <> 사용 모델: <b>요약 {me.admin_model}</b> · <b>전사 {me.admin_stt_model || me.admin_model}</b>.</>
+              )}
+            </p>
+            <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-medium text-teal-800">
+              <input type="checkbox" checked={useOwnApi} onChange={(e) => setUseOwnApi(e.target.checked)}
+                className="size-3.5 accent-teal-700" />
+              개인 API 설정 사용 (직접 발급한 키·모델을 쓰려면 체크)
+            </label>
+          </div>
+        )}
+
         {/* Gemini 키 (전사에 필수, 요약 제공자가 Gemini면 요약에도 사용) */}
-        <label className="mt-5 block text-sm font-medium text-slate-700">Gemini API 키</label>
-        <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)}
-          placeholder="AIza..." className={INPUT_CLS} />
-        <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer"
-          className="mt-1 inline-block text-xs text-teal-700 hover:underline">
-          → Google AI Studio에서 키 발급
-        </a>
-        <p className="mt-1 text-xs text-slate-400">
-          키는 <b>내 계정에</b> 저장되어 다른 기기에서도 로그인하면 사용됩니다. 오디오 전사는 항상 Gemini를 사용합니다.
-        </p>
-        {me?.using_admin_key && (
-          <p className="mt-1 rounded-lg bg-teal-50 px-3 py-1.5 text-xs text-teal-700">
-            현재 <b>관리자의 API 키</b>를 사용 중입니다. 위에 본인 키를 입력하면 본인 키가 우선됩니다.
-          </p>
+        <label className={`mt-5 block text-sm font-medium ${adminLocked ? "text-slate-400" : "text-slate-700"}`}>
+          Gemini API 키
+        </label>
+        <input type="password" value={adminLocked ? "" : apiKey} onChange={(e) => setApiKey(e.target.value)}
+          disabled={adminLocked}
+          placeholder={adminLocked ? "관리자 키 사용 중 — 위에서 '개인 API 설정 사용'을 켜면 입력할 수 있습니다" : "AIza..."}
+          className={INPUT_CLS + (adminLocked ? " bg-slate-50 text-slate-400" : "")} />
+        {!adminLocked && (
+          <>
+            <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer"
+              className="mt-1 inline-block text-xs text-teal-700 hover:underline">
+              → Google AI Studio에서 키 발급
+            </a>
+            <p className="mt-1 text-xs text-slate-400">
+              키는 <b>내 계정에</b> 저장되어 다른 기기에서도 로그인하면 사용됩니다. 오디오 전사는 항상 Gemini를 사용합니다.
+            </p>
+          </>
         )}
         {me?.can_use_admin_key && me?.has_own_key && (
           <p className="mt-1 text-xs text-slate-400">관리자 키 사용이 허용된 계정입니다 — 본인 키를 비우면 관리자 키로 전환됩니다.</p>
         )}
 
         {/* 유료(예비) 키 — 무료 한도 소진 시 자동 전환 */}
-        <label className="mt-4 block text-sm font-medium text-slate-700">유료(예비) API 키 (선택)</label>
-        <input type="password" value={apiKey2} onChange={(e) => setApiKey2(e.target.value)}
-          placeholder="무료 키 한도 소진 시 자동으로 전환할 키" className={INPUT_CLS} />
-        <p className="mt-1 text-xs text-slate-400">
-          위 키가 무료 등급이라면, 한도 소진(429) 시 <b>이 키로 자동 전환</b>해 전사·요약을 계속합니다.
-          전환되면 화면에 안내가 표시됩니다.
-        </p>
+        <label className={`mt-4 block text-sm font-medium ${adminLocked ? "text-slate-400" : "text-slate-700"}`}>
+          유료(예비) API 키 (선택)
+        </label>
+        <input type="password" value={adminLocked ? "" : apiKey2} onChange={(e) => setApiKey2(e.target.value)}
+          disabled={adminLocked}
+          placeholder={adminLocked ? "관리자 키 사용 중" : "무료 키 한도 소진 시 자동으로 전환할 키"}
+          className={INPUT_CLS + (adminLocked ? " bg-slate-50 text-slate-400" : "")} />
+        {!adminLocked && (
+          <p className="mt-1 text-xs text-slate-400">
+            위 키가 무료 등급이라면, 한도 소진(429) 시 <b>이 키로 자동 전환</b>해 전사·요약을 계속합니다.
+            전환되면 화면에 안내가 표시됩니다.
+          </p>
+        )}
 
         {/* 실시간 모델 목록 상태 + 새로고침 */}
         <div className="mt-2 flex items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2">
@@ -1602,12 +1677,18 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
 
         {/* OpenAI(GPT) API 키 — 전사·요약 공용 */}
         <div className="mt-6 border-t border-slate-100 pt-5">
-          <h3 className="text-sm font-semibold text-slate-700">OpenAI(GPT) API 키 (선택)</h3>
-          <input type="password" value={openaiKey} onChange={(e) => setOpenaiKey(e.target.value)}
-            placeholder="sk-… (전사·요약 제공자로 GPT를 쓸 때 필요)" className={INPUT_CLS} />
-          <p className="mt-1 text-xs text-slate-400">
-            이 키는 <b>이 브라우저에만</b> 저장되며, 아래에서 전사·요약 제공자를 GPT로 선택하면 사용됩니다.
-          </p>
+          <h3 className={`text-sm font-semibold ${adminLocked ? "text-slate-400" : "text-slate-700"}`}>
+            OpenAI(GPT) API 키 (선택)
+          </h3>
+          <input type="password" value={adminLocked ? "" : openaiKey} onChange={(e) => setOpenaiKey(e.target.value)}
+            disabled={adminLocked}
+            placeholder={adminLocked ? "관리자 키 사용 중 — 개인 API 설정을 켜면 입력할 수 있습니다" : "sk-… (전사·요약 제공자로 GPT를 쓸 때 필요)"}
+            className={INPUT_CLS + (adminLocked ? " bg-slate-50 text-slate-400" : "")} />
+          {!adminLocked && (
+            <p className="mt-1 text-xs text-slate-400">
+              이 키는 <b>이 브라우저에만</b> 저장되며, 아래에서 전사·요약 제공자를 GPT로 선택하면 사용됩니다.
+            </p>
+          )}
         </div>
 
         {/* 요약 제공자 */}
@@ -1616,8 +1697,8 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
           <div className="mt-2 flex gap-2">
             {[["gemini", "Gemini"], ["openai", "GPT (OpenAI)"], ["local", "로컬 LLM"]].map(([v, label]) => (
               <button key={v} onClick={() => setSummaryProvider(v)}
-                disabled={locked && v !== "gemini"}
-                title={locked && v !== "gemini" ? "관리자 키 사용 중에는 관리자가 지정한 Gemini 모델만 사용할 수 있습니다" : ""}
+                disabled={adminLocked}
+                title={adminLocked ? "관리자 키 사용 중 — 개인 API 설정을 켜면 변경할 수 있습니다" : ""}
                 className={`flex-1 rounded-xl border px-3 py-2 text-sm font-medium ${
                   summaryProvider === v ? "border-teal-500 bg-teal-50 text-teal-700" : "border-slate-200 text-slate-500"
                 } disabled:cursor-not-allowed disabled:opacity-40`}>
@@ -1687,8 +1768,8 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
           <div className="mt-2 flex gap-2">
             {[["gemini", "Gemini"], ["openai", "GPT (OpenAI)"]].map(([v, label]) => (
               <button key={v} onClick={() => setSttProvider(v)}
-                disabled={locked && v !== "gemini"}
-                title={locked && v !== "gemini" ? "관리자 키 사용 중에는 관리자가 지정한 Gemini 모델만 사용할 수 있습니다" : ""}
+                disabled={adminLocked}
+                title={adminLocked ? "관리자 키 사용 중 — 개인 API 설정을 켜면 변경할 수 있습니다" : ""}
                 className={`flex-1 rounded-xl border px-3 py-2 text-sm font-medium ${
                   sttProvider === v ? "border-teal-500 bg-teal-50 text-teal-700" : "border-slate-200 text-slate-500"
                 } disabled:cursor-not-allowed disabled:opacity-40`}>
@@ -1796,8 +1877,14 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
                 className="text-xs font-medium text-teal-700 hover:underline">🔑 토큰 확인</button>
               <button type="button" onClick={() => runTest("notion_test")}
                 className="text-xs font-medium text-teal-700 hover:underline">📋 테이블 확인</button>
+              <button type="button" onClick={dedupeNotion} disabled={dedupeBusy}
+                title="같은 회의록이 여러 행으로 저장된 경우 최신 1개만 남기고 정리합니다"
+                className="text-xs font-medium text-teal-700 hover:underline disabled:opacity-40">
+                {dedupeBusy ? "정리 중…" : "🧹 중복 정리"}
+              </button>
             </span>
           </div>
+          {dedupeMsg && <p className="mt-1 rounded-lg bg-slate-50 px-3 py-1.5 text-xs text-slate-600">{dedupeMsg}</p>}
           <p className="mt-1 text-xs text-slate-400">
             ⚠️ Notion에서 대상 페이지/DB를 열고 ··· → 연결 → 만든 통합을 추가해야 접근됩니다. 확인은 저장 후 가능합니다.
             위 테이블은 <b>기본값</b>이며, 📁 프로젝트 관리에서 프로젝트별로 다른 테이블을 지정할 수 있습니다.
