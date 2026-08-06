@@ -21,11 +21,54 @@ const fmtDateTime = (d, tz) => {
 };
 
 // 기본 모델 목록 (키가 없거나 실시간 조회 실패 시 폴백)
+// 기본 Gemini 모델 목록 — 키가 있으면 '🔄 모델 목록 새로고침'으로 실시간 목록을 받아 대체된다
 const MODELS = [
+  { id: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash-Lite — 최신·가장 저렴" },
+  { id: "gemini-3.5-flash", label: "Gemini 3.5 Flash — 최신 균형형" },
+  { id: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash-Lite — 저렴" },
+  { id: "gemini-3.1-flash", label: "Gemini 3.1 Flash" },
+  { id: "gemini-3.1-pro", label: "Gemini 3.1 Pro — 고성능" },
+  { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite" },
   { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash — 빠르고 저렴 (권장)" },
   { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro — 고성능" },
   { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
 ];
+
+// OpenAI 기본 목록 — 키를 넣고 '🔄 모델 목록 새로고침'을 누르면 계정에서 쓸 수 있는 실제 목록으로 대체
+const OPENAI_CHAT_MODELS = [
+  { id: "gpt-5.6-luna", label: "GPT-5.6 Luna — 빠르고 저렴 (권장)" },
+  { id: "gpt-5.6", label: "GPT-5.6 — 고성능" },
+  { id: "gpt-5.6-terra", label: "GPT-5.6 Terra" },
+  { id: "gpt-4o", label: "GPT-4o" },
+  { id: "gpt-4o-mini", label: "GPT-4o mini — 저렴" },
+];
+const OPENAI_STT_MODELS = [
+  { id: "gpt-transcribe", label: "GPT Transcribe — 최신·가장 저렴" },
+  { id: "gpt-4o-transcribe", label: "GPT-4o Transcribe" },
+  { id: "gpt-4o-mini-transcribe", label: "GPT-4o mini Transcribe — 저렴" },
+  { id: "whisper-1", label: "Whisper v1" },
+];
+
+// OpenAI 계정에서 사용 가능한 모델 목록 (요약용/전사용으로 분류해 반환)
+async function listOpenAIModels(apiKey) {
+  const res = await gfetch(
+    "https://api.openai.com/v1/models",
+    { headers: { Authorization: `Bearer ${apiKey}` } },
+    "OpenAI 모델 목록 조회",
+    30_000,
+  );
+  if (!res.ok) {
+    const msg = (await res.json().catch(() => ({}))).error?.message ?? `HTTP ${res.status}`;
+    throw new Error(msg);
+  }
+  const ids = ((await res.json()).data ?? []).map((m) => m.id).sort();
+  const stt = ids.filter((id) => /transcribe|whisper/i.test(id));
+  // 채팅(요약)용: gpt 계열에서 전사·이미지·임베딩·TTS 등 비대화형 모델 제외
+  const chat = ids.filter(
+    (id) => /^(gpt|o\d|chatgpt)/i.test(id) && !/transcribe|whisper|tts|audio|realtime|image|embed|moderation|dall|search|codex/i.test(id),
+  );
+  return { chat, stt };
+}
 
 // 실시간 모델 목록: Gemini 모델 목록 API에서 현재 계정 키로 사용 가능한 모델을 조회.
 // generateContent를 지원하는 gemini-* 모델만 (요약·전사·제목 추천이 모두 이 방식 사용).
@@ -1504,6 +1547,32 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
     return base.some((m) => m.id === model) ? base : [{ id: model, label: model }, ...base];
   })();
 
+  // OpenAI 계정에서 쓸 수 있는 모델 목록 (요약용/전사용)
+  const [oaModels, setOaModels] = useState(null); // { chat: [], stt: [] }
+  const [oaStatus, setOaStatus] = useState("");
+  const refreshOpenAIModels = async () => {
+    if (!openaiKey.trim()) {
+      setOaStatus("OpenAI 키 입력 후 새로고침하면 계정에서 쓸 수 있는 모델을 불러옵니다.");
+      return;
+    }
+    setOaStatus("모델 목록 불러오는 중…");
+    try {
+      const r = await listOpenAIModels(openaiKey.trim());
+      setOaModels(r);
+      setOaStatus(`사용 가능 모델 — 요약 ${r.chat.length}개 · 전사 ${r.stt.length}개`);
+    } catch (e) {
+      setOaModels(null);
+      setOaStatus(`목록 조회 실패 (${e.message}) — 기본 목록 사용`);
+    }
+  };
+  // 실시간 목록이 있으면 그것을, 없으면 기본 목록을 옵션으로 사용
+  const oaChatOptions = oaModels?.chat?.length
+    ? oaModels.chat.map((id) => ({ id, label: id }))
+    : OPENAI_CHAT_MODELS;
+  const oaSttOptions = oaModels?.stt?.length
+    ? oaModels.stt.map((id) => ({ id, label: id }))
+    : OPENAI_STT_MODELS;
+
   // 로컬 서버(OpenAI 호환)의 모델 목록 조회 — 모델명 오타 방지
   const [localModels, setLocalModels] = useState(null);
   const [localStatus, setLocalStatus] = useState("");
@@ -1685,9 +1754,18 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
             placeholder={adminLocked ? "관리자 키 사용 중 — 개인 API 설정을 켜면 입력할 수 있습니다" : "sk-… (전사·요약 제공자로 GPT를 쓸 때 필요)"}
             className={INPUT_CLS + (adminLocked ? " bg-slate-50 text-slate-400" : "")} />
           {!adminLocked && (
-            <p className="mt-1 text-xs text-slate-400">
-              이 키는 <b>이 브라우저에만</b> 저장되며, 아래에서 전사·요약 제공자를 GPT로 선택하면 사용됩니다.
-            </p>
+            <>
+              <div className="mt-2 flex items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2">
+                <span className="text-xs text-slate-500">{oaStatus || "GPT 실시간 모델 목록"}</span>
+                <button type="button" onClick={refreshOpenAIModels}
+                  className="shrink-0 text-xs font-medium text-teal-700 hover:underline">
+                  🔄 모델 목록 새로고침
+                </button>
+              </div>
+              <p className="mt-1 text-xs text-slate-400">
+                이 키는 <b>이 브라우저에만</b> 저장되며, 아래에서 전사·요약 제공자를 GPT로 선택하면 사용됩니다.
+              </p>
+            </>
           )}
         </div>
 
@@ -1713,9 +1791,12 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
               <input list="openai-sum-models" value={openaiSumModel} onChange={(e) => setOpenaiSumModel(e.target.value.trim())}
                 placeholder="예: gpt-5.6-luna" className={INPUT_CLS} />
               <datalist id="openai-sum-models">
-                {["gpt-5.6-luna", "gpt-5.6", "gpt-4o-mini", "gpt-4o"].map((id) => <option key={id} value={id} />)}
+                {oaChatOptions.map((m) => <option key={m.id} value={m.id}>{m.label !== m.id ? m.label : undefined}</option>)}
               </datalist>
-              <p className="mt-1 text-xs text-slate-400">위의 OpenAI API 키를 사용합니다.</p>
+              <p className="mt-1 text-xs text-slate-400">
+                목록에서 고르거나 모델 ID를 직접 입력할 수 있습니다 (예: gpt-5.6-luna).
+                위 <b>🔄 모델 목록 새로고침</b>을 누르면 내 계정에서 쓸 수 있는 모델이 목록에 채워집니다.
+              </p>
             </>
           ) : summaryProvider === "gemini" ? (
             <>
@@ -1729,9 +1810,18 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
                   </p>
                 </>
               ) : (
-                <select value={model} onChange={(e) => setModel(e.target.value)} className={INPUT_CLS + " bg-white"}>
-                  {modelOptions.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-                </select>
+                <>
+                  {/* 목록에서 고르거나 새 모델 ID를 직접 입력 가능 */}
+                  <input list="gemini-sum-models" value={model} onChange={(e) => setModel(e.target.value.trim())}
+                    placeholder="예: gemini-3.5-flash-lite" className={INPUT_CLS} />
+                  <datalist id="gemini-sum-models">
+                    {modelOptions.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+                  </datalist>
+                  <p className="mt-1 text-xs text-slate-400">
+                    목록에서 고르거나 모델 ID를 직접 입력할 수 있습니다. 위 <b>🔄 모델 목록 새로고침</b>으로
+                    내 키에서 쓸 수 있는 최신 모델을 불러올 수 있습니다.
+                  </p>
+                </>
               )}
             </>
           ) : (
@@ -1784,7 +1874,7 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
               <input list="openai-stt-models" value={openaiSttModel} onChange={(e) => setOpenaiSttModel(e.target.value.trim())}
                 placeholder="예: gpt-4o-transcribe" className={INPUT_CLS} />
               <datalist id="openai-stt-models">
-                {["gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"].map((id) => <option key={id} value={id} />)}
+                {oaSttOptions.map((m) => <option key={m.id} value={m.id}>{m.label !== m.id ? m.label : undefined}</option>)}
               </datalist>
               <p className="mt-1 text-xs text-slate-400">
                 위의 OpenAI API 키를 사용합니다. ⚠️ GPT 전사는 <b>화자 분리(화자 1/화자 2 구분)를 지원하지 않아</b>
