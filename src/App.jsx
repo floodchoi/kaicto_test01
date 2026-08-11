@@ -1469,6 +1469,22 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
   const [notionType, setNotionType] = useState(me?.notion_target_type ?? "database");
   const [doorayToken, setDoorayToken] = useState("");
   const [doorayProject, setDoorayProject] = useState(me?.dooray_project_id ?? "");
+  // 이메일 발송 (SMTP) — 비밀번호는 입력했을 때만 교체
+  const [smtpHost, setSmtpHost] = useState(me?.smtp_host ?? "");
+  const [smtpPort, setSmtpPort] = useState(String(me?.smtp_port ?? 587));
+  const [smtpUser, setSmtpUser] = useState(me?.smtp_user ?? "");
+  const [smtpPass, setSmtpPass] = useState("");
+  const [smtpFrom, setSmtpFrom] = useState(me?.smtp_from ?? "");
+  const [smtpMsg, setSmtpMsg] = useState("");
+  const testEmail = async () => {
+    setSmtpMsg("테스트 메일 발송 중…");
+    try {
+      const r = await api("/api/email", { method: "POST", body: JSON.stringify({ action: "test" }) });
+      setSmtpMsg(`✅ ${r.to} 로 테스트 메일을 보냈습니다 — 받은 편지함을 확인하세요.`);
+    } catch (e) {
+      setSmtpMsg("⚠️ " + e.message);
+    }
+  };
   const [testMsg, setTestMsg] = useState("");
   // 🧹 Notion 중복 정리 — 먼저 검사(dryRun)해서 확인을 받고, 승인 시 보관 처리
   const [dedupeBusy, setDedupeBusy] = useState(false);
@@ -1642,6 +1658,17 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
     }
     if (doorayToken.trim()) integ.dooray_token = doorayToken.trim();
     if (doorayProject.trim() !== (me?.dooray_project_id ?? "")) integ.dooray_project_id = doorayProject.trim();
+    // 이메일(SMTP): 비밀번호는 입력했을 때만, 나머지는 바뀐 경우에만 전송
+    if (smtpPass.trim()) integ.smtp_pass = smtpPass.trim();
+    if (
+      smtpHost !== (me?.smtp_host ?? "") || String(smtpPort) !== String(me?.smtp_port ?? 587) ||
+      smtpUser !== (me?.smtp_user ?? "") || smtpFrom !== (me?.smtp_from ?? "")
+    ) {
+      integ.smtp_host = smtpHost;
+      integ.smtp_port = smtpPort;
+      integ.smtp_user = smtpUser;
+      integ.smtp_from = smtpFrom;
+    }
     if (keyChanged || key2Changed || sharedChanged || Object.keys(integ).length) {
       setSaving(true);
       setSaveError(null);
@@ -1998,6 +2025,35 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
               className="shrink-0 text-xs font-medium text-teal-700 hover:underline">📋 프로젝트</button>
           </div>
           {testMsg && <p className="mt-2 rounded-lg bg-slate-50 px-3 py-1.5 text-xs text-slate-600">{testMsg}</p>}
+
+          {/* 이메일 발송 (SMTP) — 회의록을 메일로 보낼 때 사용 */}
+          <h4 className="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-400">이메일 (SMTP)</h4>
+          <p className="mt-1 text-xs text-slate-500">
+            회의록 상세의 <b>✉️ 이메일 보내기</b>로 요약·아젠다·액션 아이템을 메일로 보냅니다.
+            Gmail은 <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noreferrer"
+              className="text-teal-700 hover:underline">앱 비밀번호</a>를 발급해 <code>smtp.gmail.com</code> / 587로 설정하세요.
+          </p>
+          <div className="mt-2 flex gap-2">
+            <input value={smtpHost} onChange={(e) => setSmtpHost(e.target.value.trim())}
+              placeholder="SMTP 서버 (예: smtp.gmail.com)" className={INPUT_CLS + " mt-0 min-w-0 flex-1"} />
+            <input value={smtpPort} onChange={(e) => setSmtpPort(e.target.value.trim())}
+              placeholder="587" className={INPUT_CLS + " mt-0 w-20"} />
+          </div>
+          <input value={smtpUser} onChange={(e) => setSmtpUser(e.target.value.trim())}
+            placeholder="계정 (보통 보내는 이메일 주소)" className={INPUT_CLS} />
+          <input type="password" value={smtpPass} onChange={(e) => setSmtpPass(e.target.value)}
+            placeholder={me?.has_smtp_pass ? "저장됨 — 변경할 때만 입력" : "비밀번호 / 앱 비밀번호"}
+            className={INPUT_CLS} />
+          <div className="mt-2 flex items-center gap-2">
+            <input value={smtpFrom} onChange={(e) => setSmtpFrom(e.target.value.trim())}
+              placeholder='보내는 사람 (선택, 예: 회의록 <me@company.com>)' className={INPUT_CLS + " mt-0 min-w-0 flex-1"} />
+            <button type="button" onClick={testEmail}
+              className="shrink-0 text-xs font-medium text-teal-700 hover:underline">✉️ 테스트 발송</button>
+          </div>
+          {smtpMsg && <p className="mt-2 rounded-lg bg-slate-50 px-3 py-1.5 text-xs text-slate-600">{smtpMsg}</p>}
+          <p className="mt-1 text-xs text-slate-400">
+            비밀번호는 계정에 <b>암호화 저장</b>되며 브라우저로 내려오지 않습니다. 테스트는 저장 후 가능합니다.
+          </p>
         </div>
 
         {saveError && <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">⚠️ {saveError}</p>}
@@ -2794,6 +2850,8 @@ const ACT_LABEL = {
   notion_error: "⚠️ Notion 실패",
   dooray_sync: "Dooray 등록",
   dooray_error: "⚠️ Dooray 실패",
+  email_send: "이메일 발송",
+  email_error: "⚠️ 이메일 실패",
 };
 
 /* ── 도움말: 기능 소개 팝업 ─────────────────────────────────── */
@@ -4102,6 +4160,28 @@ function Detail({ id, onBack, projects, me, settings }) {
   };
   const hasIntegrations = me?.has_notion_token || me?.has_dooray_token;
 
+  // ✉️ 이메일 보내기 — 수신자 미지정 시 가입 이메일로 발송
+  const [mailOpen, setMailOpen] = useState(false);
+  const [mailTo, setMailTo] = useState("");
+  const [mailRaw, setMailRaw] = useState(true);
+  const [mailBusy, setMailBusy] = useState(false);
+  const sendEmail = async () => {
+    setMailBusy(true);
+    try {
+      const r = await api("/api/email", {
+        method: "POST",
+        body: JSON.stringify({ action: "send", meetingId: id, to: mailTo.trim(), includeRaw: mailRaw }),
+      });
+      setMailOpen(false);
+      setMailTo("");
+      setSyncMsg({ text: `✉️ ${r.to.join(", ")} 로 회의록을 보냈습니다.`, url: null });
+    } catch (e) {
+      setSyncMsg({ text: "⚠️ 이메일 발송 실패: " + e.message, url: null });
+    } finally {
+      setMailBusy(false);
+    }
+  };
+
   useEffect(() => {
     api(`/api/meetings/${id}`).then(setM).catch(console.error);
   }, [id]);
@@ -4164,6 +4244,15 @@ function Detail({ id, onBack, projects, me, settings }) {
               </button>
             )}
             <button
+              onClick={() => setMailOpen((v) => !v)}
+              title="회의록 요약·아젠다·액션 아이템을 이메일로 보냅니다"
+              className={`rounded-lg border px-3 py-1.5 text-sm font-medium hover:bg-slate-50 ${
+                mailOpen ? "border-teal-500 bg-teal-50 text-teal-700" : "border-slate-200 bg-white text-slate-600"
+              }`}
+            >
+              ✉️ 이메일
+            </button>
+            <button
               onClick={resummarize}
               disabled={resum.status === "running"}
               title="저장된 원문으로 요약·아젠다·액션 아이템을 다시 생성합니다"
@@ -4207,6 +4296,34 @@ function Detail({ id, onBack, projects, me, settings }) {
             </a>
           )}
           <button onClick={() => setSyncMsg(null)} title="닫기" className="text-teal-500 hover:text-teal-700">✕</button>
+        </div>
+      )}
+
+      {/* 이메일 발송 패널 */}
+      {mailOpen && (
+        <div className="rounded-xl border border-teal-200 bg-teal-50/50 p-4">
+          <label className="text-xs font-semibold text-teal-800">받는 사람</label>
+          <div className="mt-1.5 flex flex-wrap items-center gap-2">
+            <input value={mailTo} onChange={(e) => setMailTo(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && !mailBusy && sendEmail()}
+              placeholder={`비우면 내 이메일(${me?.email ?? "가입 주소"})로 발송 — 쉼표로 여러 명 가능`}
+              className="min-w-48 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm outline-none focus:border-teal-500" />
+            <button onClick={sendEmail} disabled={mailBusy}
+              className="shrink-0 rounded-lg bg-teal-700 px-3 py-1.5 text-sm font-semibold text-white hover:bg-teal-600 disabled:opacity-40">
+              {mailBusy ? "보내는 중…" : "보내기"}
+            </button>
+            <button onClick={() => setMailOpen(false)} className="shrink-0 text-xs text-slate-500 underline">취소</button>
+          </div>
+          <label className="mt-2 flex cursor-pointer items-center gap-1.5 text-xs text-slate-600">
+            <input type="checkbox" checked={mailRaw} onChange={(e) => setMailRaw(e.target.checked)}
+              className="size-3.5 accent-teal-700" />
+            회의 원문도 함께 보내기
+          </label>
+          {!me?.smtp_host && (
+            <p className="mt-2 text-xs text-amber-700">
+              ⚠️ 먼저 ⚙️ 설정 → 이메일(SMTP)에서 발송 서버를 등록해주세요.
+            </p>
+          )}
         </div>
       )}
 

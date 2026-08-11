@@ -18,6 +18,11 @@ CREATE TABLE users (
   notion_target_type TEXT,                  -- 'database' | 'page'
   dooray_token_enc  TEXT,                   -- Dooray API 토큰 (암호화)
   dooray_project_id TEXT,                   -- Dooray 프로젝트 ID
+  smtp_host         TEXT,                   -- 이메일 발송 SMTP 서버
+  smtp_port         INT,
+  smtp_user         TEXT,
+  smtp_pass_enc     TEXT,                   -- SMTP 비밀번호/앱 비밀번호 (암호화)
+  smtp_from         TEXT,                   -- 보내는 사람 (비우면 smtp_user)
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 -- 초기 관리자는 floodchoi@gmail.com — 가입 시 코드에서 자동 지정.

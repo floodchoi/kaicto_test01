@@ -8,7 +8,8 @@
     { "source": "/api/usage", "destination": "/api/misc?fn=usage" },
     { "source": "/api/integrations", "destination": "/api/misc?fn=integrations" },
     { "source": "/api/invite-codes", "destination": "/api/misc?fn=invite-codes" },
-    { "source": "/api/migrate", "destination": "/api/misc?fn=migrate" }
+    { "source": "/api/migrate", "destination": "/api/misc?fn=migrate" },
+    { "source": "/api/email", "destination": "/api/misc?fn=email" }
   ],
   "headers": [
     {

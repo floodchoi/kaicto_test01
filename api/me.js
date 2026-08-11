@@ -47,6 +47,22 @@ export default wrap(async function handler(req, res) {
       const v = String(b.dooray_project_id ?? "").trim().slice(0, 100) || null;
       await sql`UPDATE users SET dooray_project_id = ${v} WHERE id = ${userId}`;
     }
+    // 이메일(SMTP) 설정 — 비밀번호는 암호화 저장, 빈 문자열이면 삭제
+    if ("smtp_pass" in b) {
+      const v = String(b.smtp_pass ?? "").trim();
+      if (v.length > 300) return res.status(400).json({ error: "비밀번호가 너무 깁니다." });
+      await sql`UPDATE users SET smtp_pass_enc = ${v ? encryptSecret(v) : null} WHERE id = ${userId}`;
+    }
+    if ("smtp_host" in b || "smtp_port" in b || "smtp_user" in b || "smtp_from" in b) {
+      const host = String(b.smtp_host ?? "").trim().slice(0, 200) || null;
+      const portNum = Number(b.smtp_port);
+      const port = Number.isInteger(portNum) && portNum > 0 && portNum < 65536 ? portNum : 587;
+      const user = String(b.smtp_user ?? "").trim().slice(0, 200) || null;
+      const fromAddr = String(b.smtp_from ?? "").trim().slice(0, 200) || null;
+      await sql`
+        UPDATE users SET smtp_host = ${host}, smtp_port = ${port}, smtp_user = ${user}, smtp_from = ${fromAddr}
+        WHERE id = ${userId}`;
+    }
     if ("shared_model" in b || "shared_stt_model" in b) {
       const [u] = await sql`SELECT is_admin FROM users WHERE id = ${userId}`;
       if (!u?.is_admin) return res.status(403).json({ error: "공유 모델은 관리자만 지정할 수 있습니다." });
@@ -70,6 +86,7 @@ export default wrap(async function handler(req, res) {
               shared_model, shared_stt_model,
               notion_token_enc, notion_target_id, notion_target_type,
               dooray_token_enc, dooray_project_id,
+              smtp_host, smtp_port, smtp_user, smtp_pass_enc, smtp_from,
               (SELECT 1 FROM activity_log WHERE false) AS _probe_log,
               (SELECT 1 FROM api_usage WHERE false) AS _probe_usage,
               (SELECT notion_target_sent FROM meetings WHERE false) AS _probe_sync,
@@ -106,6 +123,12 @@ export default wrap(async function handler(req, res) {
     notion_target_id: me.notion_target_id ?? "",
     notion_target_type: me.notion_target_type ?? "database",
     has_dooray_token: !!me.dooray_token_enc,
+    // 이메일(SMTP) — 비밀번호는 반환하지 않고 존재 여부만
+    smtp_host: me.smtp_host ?? "",
+    smtp_port: me.smtp_port ?? 587,
+    smtp_user: me.smtp_user ?? "",
+    smtp_from: me.smtp_from ?? "",
+    has_smtp_pass: !!me.smtp_pass_enc,
     dooray_project_id: me.dooray_project_id ?? "",
     // 관리자 본인: Settings 프리필용 / 관리자 키 사용자: 강제할 모델
     ...(me.is_admin && { shared_model: me.shared_model, shared_stt_model: me.shared_stt_model }),

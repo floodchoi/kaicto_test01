@@ -24,7 +24,12 @@ ALTER TABLE users
   ADD COLUMN IF NOT EXISTS notion_target_id  TEXT,   -- 저장 대상 페이지/DB (URL 또는 ID)
   ADD COLUMN IF NOT EXISTS notion_target_type TEXT,  -- 'database' | 'page'
   ADD COLUMN IF NOT EXISTS dooray_token_enc  TEXT,   -- Dooray API 토큰 (암호화)
-  ADD COLUMN IF NOT EXISTS dooray_project_id TEXT;   -- Dooray 프로젝트 ID (액션 아이템 등록 대상)
+  ADD COLUMN IF NOT EXISTS dooray_project_id TEXT,   -- Dooray 프로젝트 ID (액션 아이템 등록 대상)
+  ADD COLUMN IF NOT EXISTS smtp_host     TEXT,       -- 이메일 발송 SMTP 서버
+  ADD COLUMN IF NOT EXISTS smtp_port     INT,
+  ADD COLUMN IF NOT EXISTS smtp_user     TEXT,
+  ADD COLUMN IF NOT EXISTS smtp_pass_enc TEXT,       -- SMTP 비밀번호/앱 비밀번호 (암호화)
+  ADD COLUMN IF NOT EXISTS smtp_from     TEXT;       -- 보내는 사람 (비우면 smtp_user)
 
 -- 초기 관리자 지정 (이미 가입돼 있으면 승격, 미가입이면 가입 시 자동 지정)
 UPDATE users SET is_admin = true, approved = true WHERE email = 'floodchoi@gmail.com';
