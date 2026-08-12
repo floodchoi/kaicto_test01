@@ -20,6 +20,11 @@ export default wrap(async function handler(req, res) {
         UPDATE users SET gemini_key_enc = ${key ? encryptSecret(key) : null}
         WHERE id = ${userId}`;
     }
+    if ("openai_api_key" in b) {
+      const key = String(b.openai_api_key ?? "").trim();
+      if (key.length > 300) return res.status(400).json({ error: "키가 너무 깁니다." });
+      await sql`UPDATE users SET openai_key_enc = ${key ? encryptSecret(key) : null} WHERE id = ${userId}`;
+    }
     if ("gemini_api_key2" in b) {
       const key = String(b.gemini_api_key2 ?? "").trim();
       if (key.length > 300) return res.status(400).json({ error: "키가 너무 깁니다." });
@@ -75,7 +80,7 @@ export default wrap(async function handler(req, res) {
       const ss = String(b.shared_stt_model ?? "").trim().slice(0, 100) || null;
       await sql`UPDATE users SET shared_model = ${sm}, shared_stt_model = ${ss} WHERE id = ${userId}`;
     }
-    const changed = ["gemini_api_key", "gemini_api_key2", "shared_model", "notion_token", "notion_target_id", "dooray_token", "dooray_project_id"].filter((k) => k in b || (k === "shared_model" && "shared_stt_model" in b));
+    const changed = ["gemini_api_key", "openai_api_key", "gemini_api_key2", "shared_model", "notion_token", "notion_target_id", "dooray_token", "dooray_project_id"].filter((k) => k in b || (k === "shared_model" && "shared_stt_model" in b));
     if (changed.length) await logAct(userId, "key_save", changed.join(", ") + " 변경");
     return res.status(200).json({ ok: true });
   }
@@ -87,7 +92,7 @@ export default wrap(async function handler(req, res) {
   // 초기 로드마다 호출되는 API라 왕복 횟수를 최소화한다. (스키마 변경 시 프로브도 갱신할 것)
   const [me] = await sql`
     UPDATE users SET last_seen_at = now() WHERE id = ${userId}
-    RETURNING email, is_admin, can_use_admin_key, gemini_key_enc, gemini_key2_enc,
+    RETURNING email, is_admin, can_use_admin_key, gemini_key_enc, gemini_key2_enc, openai_key_enc,
               shared_model, shared_stt_model,
               notion_token_enc, notion_target_id, notion_target_type,
               dooray_token_enc, dooray_project_id,
@@ -102,14 +107,16 @@ export default wrap(async function handler(req, res) {
 
   // 본인 키가 없고 관리자 키 사용이 허용된 회원이면 관리자의 키(+지정 모델)를 내려준다
   let adminKey = null;
+  let adminOpenai = null;
   let adminModels = {};
   if (!ownKey && me.can_use_admin_key) {
     const [admin] = await sql`
-      SELECT gemini_key_enc, shared_model, shared_stt_model FROM users
-      WHERE is_admin = true AND gemini_key_enc IS NOT NULL
+      SELECT gemini_key_enc, openai_key_enc, shared_model, shared_stt_model FROM users
+      WHERE is_admin = true AND (gemini_key_enc IS NOT NULL OR openai_key_enc IS NOT NULL)
       ORDER BY id LIMIT 1`;
     if (admin) {
-      adminKey = decryptSecret(admin.gemini_key_enc);
+      adminKey = admin.gemini_key_enc ? decryptSecret(admin.gemini_key_enc) : null;
+      adminOpenai = admin.openai_key_enc ? decryptSecret(admin.openai_key_enc) : null;
       adminModels = { admin_model: admin.shared_model, admin_stt_model: admin.shared_stt_model };
     }
   }
@@ -119,10 +126,13 @@ export default wrap(async function handler(req, res) {
     is_admin: me.is_admin,
     can_use_admin_key: me.can_use_admin_key,
     has_own_key: !!ownKey,
-    using_admin_key: !ownKey && !!adminKey,
+    using_admin_key: !ownKey && !!(adminKey || adminOpenai),
     gemini_key: ownKey ?? adminKey ?? "",
     // 유료(예비) 키 — 본인 키가 429(무료 한도 소진)를 반환하면 브라우저가 자동 전환
     gemini_key2: (me.gemini_key2_enc ? decryptSecret(me.gemini_key2_enc) : null) ?? "",
+    // OpenAI(GPT) 키 — 본인 키 우선, 없고 관리자 키 사용 대상이면 관리자 키
+    openai_key: (me.openai_key_enc ? decryptSecret(me.openai_key_enc) : null) ?? adminOpenai ?? "",
+    has_own_openai_key: !!me.openai_key_enc,
     // 연동 설정 (토큰 값 자체는 절대 반환하지 않음 — 존재 여부만)
     has_notion_token: !!me.notion_token_enc,
     notion_target_id: me.notion_target_id ?? "",
@@ -137,6 +147,6 @@ export default wrap(async function handler(req, res) {
     dooray_project_id: me.dooray_project_id ?? "",
     // 관리자 본인: Settings 프리필용 / 관리자 키 사용자: 강제할 모델
     ...(me.is_admin && { shared_model: me.shared_model, shared_stt_model: me.shared_stt_model }),
-    ...(!ownKey && adminKey ? adminModels : {}),
+    ...(!ownKey && (adminKey || adminOpenai) ? adminModels : {}),
   });
 });

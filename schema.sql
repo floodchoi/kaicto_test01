@@ -10,6 +10,7 @@ CREATE TABLE users (
   can_use_admin_key BOOLEAN NOT NULL DEFAULT false, -- 관리자 API 키 사용 허용
   gemini_key_enc    TEXT,                   -- 사용자별 Gemini 키 (AES-GCM 암호화)
   gemini_key2_enc   TEXT,                   -- 유료(예비) 키 — 무료 한도 소진 시 자동 전환
+  openai_key_enc    TEXT,                   -- OpenAI(GPT) 키 (암호화) — 관리자 키 공유 대상
   shared_model      TEXT,                   -- (관리자 행) 관리자 키 사용자에게 강제할 요약 모델
   shared_stt_model  TEXT,                   -- (관리자 행) 〃 전사 모델 (비우면 shared_model)
   last_seen_at      TIMESTAMPTZ,            -- 마지막 접속(앱 로드) 시각

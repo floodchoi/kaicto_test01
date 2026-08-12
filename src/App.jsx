@@ -49,6 +49,9 @@ const OPENAI_STT_MODELS = [
   { id: "whisper-1", label: "Whisper v1" },
 ];
 
+// 모델 ID로 제공자 판별 — 공유 모델(관리자 지정)이 Gemini든 GPT든 알아서 맞춰 쓰기 위해
+const isGptModel = (id) => /^(gpt|o[0-9]|chatgpt|whisper)/i.test(String(id ?? ""));
+
 // OpenAI 계정에서 사용 가능한 모델 목록 (요약용/전사용으로 분류해 반환)
 async function listOpenAIModels(apiKey) {
   const res = await gfetch(
@@ -269,6 +272,8 @@ Your task is to transcribe the provided Korean audio accurately and identify dif
 
 [Strict Rules]
 1. Listen carefully to the tone, pitch, and context to distinguish between different speakers (e.g., "화자 1", "화자 2").
+1-1. Split the transcription into short utterances — one sentence per entry. Start a new entry whenever the speaker changes or a sentence ends. Never merge several sentences into one entry.
+1-2. Every entry MUST carry "start": the time that utterance BEGINS, measured from the beginning of THIS audio clip, in "mm:ss" format ("h:mm:ss" past one hour). Read the elapsed time from the audio itself; the values must increase monotonically and must never be all zeros or evenly spaced guesses.
 2. If multiple people are speaking at the same time (overlapping), break down their sentences and assign them to the correct speaker, labeling them like "화자 1 (겹침)". Do not skip overlapping parts.
 3. Transcribe exactly what is heard, without summarizing or omitting content.
 4. If a segment is spoken in English, transcribe the English as heard, then append " / " followed by a natural Korean translation in the same "text" value.
@@ -277,20 +282,25 @@ Your task is to transcribe the provided Korean audio accurately and identify dif
 
 [Output Format]
 [
-  { "speaker": "화자 1", "text": "안녕하세요, 오늘 회의를 시작하겠습니다." },
-  { "speaker": "화자 2", "text": "네, 알겠습니다. 자료 먼저 공유해 드릴게요." },
-  { "speaker": "화자 1 (겹침)", "text": "아, 잠시만요." },
-  { "speaker": "화자 3 (겹침)", "text": "제가 먼저 발표해도 될까요?" }
+  { "start": "00:00", "speaker": "화자 1", "text": "안녕하세요, 오늘 회의를 시작하겠습니다." },
+  { "start": "00:06", "speaker": "화자 2", "text": "네, 알겠습니다." },
+  { "start": "00:09", "speaker": "화자 2", "text": "자료 먼저 공유해 드릴게요." },
+  { "start": "01:24", "speaker": "화자 1 (겹침)", "text": "아, 잠시만요." },
+  { "start": "01:24", "speaker": "화자 3 (겹침)", "text": "제가 먼저 발표해도 될까요?" }
 ]`;
 
-// Gemini structured output — JSON 배열 [{speaker, text}] 강제
+// Gemini structured output — JSON 배열 [{start, speaker, text}] 강제
 const TRANSCRIBE_SCHEMA = {
   type: "ARRAY",
   items: {
     type: "OBJECT",
-    properties: { speaker: { type: "STRING" }, text: { type: "STRING" } },
-    required: ["speaker", "text"],
-    propertyOrdering: ["speaker", "text"],
+    properties: {
+      start: { type: "STRING", description: 'utterance start time in this clip, "mm:ss"' },
+      speaker: { type: "STRING" },
+      text: { type: "STRING" },
+    },
+    required: ["start", "speaker", "text"],
+    propertyOrdering: ["start", "speaker", "text"],
   },
 };
 
@@ -300,10 +310,26 @@ const TRANSCRIBE_PROMPT = "Transcribe and diarize this audio following the rules
 // 모델이 그 인용문을 출력에 그대로 되풀이(echo)해서, 특정 문구가 조각마다 반복되는
 // 사고의 원인이 됐다. 조각 번호만 알려주고 텍스트는 일절 전달하지 않는다.
 const contPrompt = (idx, total) =>
-  `This audio is segment ${idx} of ${total} from one longer recording; earlier segments are already transcribed. Transcribe and diarize only this segment following the rules. Keep using speaker labels of the form "화자 N".`;
+  `This audio is segment ${idx} of ${total} from one longer recording; earlier segments are already transcribed. Transcribe and diarize only this segment following the rules. Keep using speaker labels of the form "화자 N". Timestamps in "start" must be measured from the beginning of THIS segment (it starts at 00:00), not from the whole recording.`;
 
-// 전사 JSON 배열 → "화자 N: 내용" 줄글로 변환 (잘린 응답은 복구, 실패 시 원문 그대로)
-function diarizedToText(raw) {
+// "mm:ss" / "h:mm:ss" / "83" → 초. 못 읽으면 null
+function parseClock(v) {
+  const t = String(v ?? "").trim();
+  if (!t) return null;
+  const m = t.match(/^(?:(\d+):)?(\d{1,2}):(\d{1,2})(?:[.,]\d+)?$/);
+  if (m) return (+(m[1] ?? 0)) * 3600 + +m[2] * 60 + +m[3];
+  return /^\d+(\.\d+)?$/.test(t) ? Math.round(+t) : null;
+}
+const fmtClock = (sec) => {
+  const s = Math.max(0, Math.round(sec));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+  const p = (n) => String(n).padStart(2, "0");
+  return h ? `${h}:${p(m)}:${p(ss)}` : `${p(m)}:${p(ss)}`;
+};
+
+// 전사 JSON 배열 → "[mm:ss] 화자 N: 내용" 줄글로 변환 (잘린 응답은 복구, 실패 시 원문 그대로)
+// offsetSec: 분할 전사 시 이 조각이 전체 녹음에서 시작하는 시각 (조각 내 상대시각에 더함)
+function diarizedToText(raw, offsetSec = 0) {
   const t = stripFences(String(raw ?? "").trim());
   let arr = null;
   try {
@@ -315,18 +341,30 @@ function diarizedToText(raw) {
   }
   if (!Array.isArray(arr)) return String(raw ?? "");
   return arr
-    .map((e) => `${(e?.speaker ?? "화자").toString().trim()}: ${(e?.text ?? "").toString().trim()}`)
-    .filter((l) => !/^.{0,30}:\s*$/.test(l))
+    .map((e) => {
+      const body = `${(e?.speaker ?? "화자").toString().trim()}: ${(e?.text ?? "").toString().trim()}`;
+      const sec = parseClock(e?.start);
+      // 타임스탬프를 못 받은 항목은 접두 없이 — 없는 시각을 지어내지 않는다
+      return sec === null ? body : `[${fmtClock(sec + offsetSec)}] ${body}`;
+    })
+    .filter((l) => !/^(\[[\d:]+\]\s*)?.{0,30}:\s*$/.test(l))
     .join("\n");
 }
 
-// 조각 이어붙일 때 경계 중복 제거: 새 조각 결과가 누적본 끝과 같은 텍스트로 시작하면 잘라냄
+// 조각 이어붙일 때 경계 중복 제거. 줄마다 시각이 붙어 문자열 비교가 안 되므로
+// 타임스탬프를 뗀 '내용'으로 비교해, 누적본 끝자락과 겹치는 앞줄들을 잘라낸다.
+const lineBody = (l) => l.replace(/^\[[\d:]+\]\s*/, "").trim();
 function trimOverlap(acc, next) {
-  const max = Math.min(300, acc.length, next.length);
-  for (let k = max; k >= 15; k--) {
-    if (acc.endsWith(next.slice(0, k))) return next.slice(k).trimStart();
+  const tail = acc.split("\n").slice(-8).map(lineBody);
+  const lines = next.split("\n");
+  let drop = 0;
+  // 짧은 맞장구("네.")까지 지우지 않도록 8자 초과인 줄만 중복으로 인정
+  while (drop < lines.length && drop < 8) {
+    const b = lineBody(lines[drop]);
+    if (b.length <= 8 || !tail.includes(b)) break;
+    drop++;
   }
-  return next;
+  return lines.slice(drop).join("\n").trimStart();
 }
 
 /* ── 오디오 분할: 브라우저에서 디코딩 → 16kHz 모노 → N분 WAV 조각 ──
@@ -702,11 +740,13 @@ async function transcribeWithGemini(fileUri, mimeType, apiKey, model, onDelta, p
 
 // OpenAI(GPT) 전사 — /v1/audio/transcriptions (multipart, 파일당 25MB 제한이라
 // 긴 파일은 호출부에서 10분 WAV 조각(~19MB)으로 분할해 넘긴다). 화자 분리 미지원(텍스트만).
-async function transcribeWithOpenAI(file, apiKey, model, signal) {
+async function transcribeWithOpenAI(file, apiKey, model, signal, offsetSec = 0) {
   const fd = new FormData();
   fd.append("file", file);
   fd.append("model", model);
-  fd.append("response_format", "text");
+  // whisper 계열만 구간별 시각(verbose_json)을 지원 — 나머지는 평문
+  const wantSegments = /whisper/i.test(model);
+  fd.append("response_format", wantSegments ? "verbose_json" : "text");
   const res = await gfetch(
     "https://api.openai.com/v1/audio/transcriptions",
     { method: "POST", headers: { Authorization: `Bearer ${apiKey}` }, body: fd, signal },
@@ -718,7 +758,15 @@ async function transcribeWithOpenAI(file, apiKey, model, signal) {
     throw new Error("전사 실패: " + msg);
   }
   const ct = res.headers.get("content-type") ?? "";
-  const text = ct.includes("json") ? ((await res.json()).text ?? "") : await res.text();
+  let text;
+  if (ct.includes("json")) {
+    const j = await res.json();
+    text = j.segments?.length
+      ? j.segments.map((sg) => `[${fmtClock((sg.start ?? 0) + offsetSec)}] ${String(sg.text ?? "").trim()}`).join("\n")
+      : (j.text ?? "");
+  } else {
+    text = await res.text();
+  }
   if (!text.trim()) throw new Error("전사 결과가 비어있습니다. 오디오에 사람 음성이 들리는지 확인하세요.");
   return text;
 }
@@ -765,8 +813,9 @@ const SUMMARY_SYSTEM = `너는 회의록 정리 전문가다. 사용자가 준 �
   · task: "[분류] 할 일" 형식으로 쓰고, 분류는 위 아젠다에서 사용한 분류와 일치시킨다(예: "[일정] 킥오프 미팅 날짜 확정"). 같은 분류끼리 이웃하도록 정렬한다.
   · assignee는 원문에 언급된 담당자만, 없으면 null. due_date는 원문의 기한 표현 그대로("7월 15일", "다음 주" 등), 없으면 null.
 - tags: 회의 주제를 나타내는 태그 2~5개 (한국어, 짧게)
+- 전사문의 각 줄은 "[mm:ss] 화자 N: 내용" 형식일 수 있다. 앞의 시각은 발화 시각이니 요약 문장에 그대로 옮겨 적지 말고, 마지막 줄의 시각까지 빠짐없이 읽었는지 확인하는 데 쓴다.
 - 원문에 없는 내용을 지어내지 않는다.
-- 출력 직전 자체 점검: 전사문 마지막 부분의 내용이 summary나 agenda에 반영됐는가? action_items가 비어 있다면 정말 후속 업무가 전혀 없었는가? 모든 agenda·action_items에 [분류]가 붙어 있고 같은 분류끼리 모여 있는가? 아니라면 고쳐서 출력한다.`;
+- 출력 직전 자체 점검: 전사문의 마지막 타임스탬프 구간 내용이 summary나 agenda에 반영됐는가? action_items가 비어 있다면 정말 후속 업무가 전혀 없었는가? 모든 agenda·action_items에 [분류]가 붙어 있고 같은 분류끼리 모여 있는가? 아니라면 고쳐서 출력한다.`;
 
 // Gemini structured output 스키마 (OpenAPI 서브셋, 타입 대문자)
 const SUMMARY_GEMINI_SCHEMA = {
@@ -1439,6 +1488,37 @@ function LandingHero() {
 const INPUT_CLS =
   "mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100";
 
+// 모델 선택기 — <datalist>는 입력값으로 목록을 걸러 1개만 보이는 문제가 있어 select로 처리.
+// groups: [{ label, options: [{id,label}] }] · 목록에 없는 모델은 "직접 입력"으로 넣는다.
+function ModelPicker({ value, onChange, groups, placeholder, noneLabel, disabled }) {
+  const known = groups.flatMap((g) => g.options).some((o) => o.id === value);
+  const [custom, setCustom] = useState(false);
+  const showCustom = custom || (!!value && !known);
+  return (
+    <>
+      <select disabled={disabled} className={INPUT_CLS + " bg-white"}
+        value={showCustom ? "__custom" : value ?? ""}
+        onChange={(e) => {
+          if (e.target.value === "__custom") return setCustom(true);
+          setCustom(false);
+          onChange(e.target.value);
+        }}>
+        {noneLabel !== undefined && <option value="">{noneLabel}</option>}
+        {groups.map((g) => (
+          <optgroup key={g.label} label={g.label}>
+            {g.options.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+          </optgroup>
+        ))}
+        <option value="__custom">✏️ 직접 입력…</option>
+      </select>
+      {showCustom && (
+        <input autoFocus value={value ?? ""} onChange={(e) => onChange(e.target.value.trim())}
+          placeholder={placeholder} className={INPUT_CLS + " mt-2"} />
+      )}
+    </>
+  );
+}
+
 function Settings({ settings, me, onSave, onServerSaved, onClose }) {
   const [apiKey, setApiKey] = useState(settings.apiKey);
   const [apiKey2, setApiKey2] = useState(settings.apiKey2 ?? "");
@@ -1646,6 +1726,7 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
 
     // 서버 저장분(계정별 키 · 예비 키 · 관리자 공유 모델 · 연동 설정) — 바뀐 경우에만 호출
     const keyChanged = next.apiKey !== (settings.apiKey ?? "").trim();
+    const oaKeyChanged = next.openaiKey !== (settings.openaiKey ?? "").trim();
     const key2Changed = next.apiKey2 !== (settings.apiKey2 ?? "").trim();
     const sharedChanged =
       me?.is_admin &&
@@ -1669,7 +1750,7 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
       integ.smtp_user = smtpUser;
       integ.smtp_from = smtpFrom;
     }
-    if (keyChanged || key2Changed || sharedChanged || Object.keys(integ).length) {
+    if (keyChanged || oaKeyChanged || key2Changed || sharedChanged || Object.keys(integ).length) {
       setSaving(true);
       setSaveError(null);
       try {
@@ -1677,6 +1758,7 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
           method: "PUT",
           body: JSON.stringify({
             ...(keyChanged && { gemini_api_key: next.apiKey }),
+            ...(oaKeyChanged && { openai_api_key: next.openaiKey }),
             ...(key2Changed && { gemini_api_key2: next.apiKey2 }),
             ...(sharedChanged && { shared_model: sharedModel.trim(), shared_stt_model: sharedStt.trim() }),
             ...integ,
@@ -1815,11 +1897,13 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
           {summaryProvider === "openai" ? (
             <>
               <label className="mt-4 block text-sm font-medium text-slate-700">GPT 요약 모델</label>
-              <input list="openai-sum-models" value={openaiSumModel} onChange={(e) => setOpenaiSumModel(e.target.value.trim())}
-                placeholder="예: gpt-5.6-luna" className={INPUT_CLS} />
-              <datalist id="openai-sum-models">
-                {oaChatOptions.map((m) => <option key={m.id} value={m.id}>{m.label !== m.id ? m.label : undefined}</option>)}
-              </datalist>
+              {locked && (
+                <p className="mb-2 rounded-lg bg-amber-50 px-3 py-1.5 text-xs text-amber-700">
+                  🔒 관리자 키 사용 중 — <b>관리자가 지정한 모델</b>로 고정됩니다.
+                </p>
+              )}
+              <ModelPicker value={openaiSumModel} onChange={setOpenaiSumModel} disabled={locked}
+                groups={[{ label: "GPT (OpenAI)", options: oaChatOptions }]} placeholder="예: gpt-5.6-luna" />
               <p className="mt-1 text-xs text-slate-400">
                 목록에서 고르거나 모델 ID를 직접 입력할 수 있습니다 (예: gpt-5.6-luna).
                 위 <b>🔄 모델 목록 새로고침</b>을 누르면 내 계정에서 쓸 수 있는 모델이 목록에 채워집니다.
@@ -1839,11 +1923,8 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
               ) : (
                 <>
                   {/* 목록에서 고르거나 새 모델 ID를 직접 입력 가능 */}
-                  <input list="gemini-sum-models" value={model} onChange={(e) => setModel(e.target.value.trim())}
-                    placeholder="예: gemini-3.5-flash-lite" className={INPUT_CLS} />
-                  <datalist id="gemini-sum-models">
-                    {modelOptions.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-                  </datalist>
+                  <ModelPicker value={model} onChange={setModel}
+                    groups={[{ label: "Gemini", options: modelOptions }]} placeholder="예: gemini-3.5-flash-lite" />
                   <p className="mt-1 text-xs text-slate-400">
                     목록에서 고르거나 모델 ID를 직접 입력할 수 있습니다. 위 <b>🔄 모델 목록 새로고침</b>으로
                     내 키에서 쓸 수 있는 최신 모델을 불러올 수 있습니다.
@@ -1867,11 +1948,14 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
               </div>
 
               <label className="mt-4 block text-sm font-medium text-slate-700">로컬 모델명</label>
-              <input list="local-models" value={localModel} onChange={(e) => setLocalModel(e.target.value)}
-                placeholder="예: google/gemma-4-12b, llama3.1" className={INPUT_CLS} />
-              <datalist id="local-models">
-                {(localModels ?? []).map((id) => <option key={id} value={id} />)}
-              </datalist>
+              {localModels?.length ? (
+                <ModelPicker value={localModel} onChange={setLocalModel}
+                  groups={[{ label: "로컬 서버 모델", options: localModels.map((id) => ({ id, label: id })) }]}
+                  placeholder="예: google/gemma-4-12b, llama3.1" />
+              ) : (
+                <input value={localModel} onChange={(e) => setLocalModel(e.target.value)}
+                  placeholder="예: google/gemma-4-12b, llama3.1" className={INPUT_CLS} />
+              )}
               <p className="mt-1 text-xs text-slate-400">
                 Ollama·LM Studio 등. 브라우저와 같은 PC에서 실행 중이어야 하고, 서버에 CORS 허용이 필요합니다.
               </p>
@@ -1898,14 +1982,11 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
           {sttProvider === "openai" ? (
             <>
               <label className="mt-4 block text-sm font-medium text-slate-700">GPT 전사 모델</label>
-              <input list="openai-stt-models" value={openaiSttModel} onChange={(e) => setOpenaiSttModel(e.target.value.trim())}
-                placeholder="예: gpt-4o-transcribe" className={INPUT_CLS} />
-              <datalist id="openai-stt-models">
-                {oaSttOptions.map((m) => <option key={m.id} value={m.id}>{m.label !== m.id ? m.label : undefined}</option>)}
-              </datalist>
+              <ModelPicker value={openaiSttModel} onChange={setOpenaiSttModel} disabled={locked}
+                groups={[{ label: "GPT (OpenAI)", options: oaSttOptions }]} placeholder="예: gpt-4o-transcribe" />
               <p className="mt-1 text-xs text-slate-400">
                 위의 OpenAI API 키를 사용합니다. ⚠️ GPT 전사는 <b>화자 분리(화자 1/화자 2 구분)를 지원하지 않아</b>
-                텍스트만 나옵니다 — 화자 분리가 필요하면 Gemini를 사용하세요.
+                텍스트만 나옵니다 — 화자 분리·문장별 시각이 필요하면 Gemini(또는 Whisper) 전사를 사용하세요.
               </p>
             </>
           ) : (
@@ -1931,11 +2012,8 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
                 </>
               ) : (
                 <>
-                  <input list="stt-models" value={sttModel} onChange={(e) => setSttModel(e.target.value.trim())}
-                    placeholder="비워두면 위 Gemini 요약 모델과 동일" className={INPUT_CLS} />
-                  <datalist id="stt-models">
-                    {modelOptions.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-                  </datalist>
+                  <ModelPicker value={sttModel} onChange={setSttModel} noneLabel="위 Gemini 요약 모델과 동일"
+                    groups={[{ label: "Gemini", options: modelOptions }]} placeholder="예: gemini-2.5-flash-lite" />
                   <p className="mt-1 text-xs text-slate-500">
                     목록에서 고르거나 다른 Gemini 모델 ID를 직접 입력할 수 있습니다 (예: gemini-2.5-flash-lite).
                   </p>
@@ -1954,15 +2032,21 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
               모델을 바꿀 수 없습니다. 비워두면 회원이 자유롭게 선택합니다.
             </p>
             <label className="mt-3 block text-sm font-medium text-slate-700">공유 요약 모델</label>
-            <select value={sharedModel} onChange={(e) => setSharedModel(e.target.value)}
-              className={INPUT_CLS + " bg-white"}>
-              <option value="">지정 안 함 (회원 자유 선택)</option>
-              {modelOptions.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-            </select>
+            <ModelPicker value={sharedModel} onChange={setSharedModel} noneLabel="지정 안 함 (회원 자유 선택)"
+              groups={[
+                { label: "Gemini", options: modelOptions },
+                { label: "GPT (OpenAI)", options: oaChatOptions },
+              ]} placeholder="모델 ID 직접 입력" />
             <label className="mt-3 block text-sm font-medium text-slate-700">공유 전사 모델</label>
-            <input list="stt-models" value={sharedStt} onChange={(e) => setSharedStt(e.target.value.trim())}
-              placeholder="비워두면 공유 요약 모델과 동일" className={INPUT_CLS} />
-            <p className="mt-1 text-xs text-slate-400">변경 사항은 해당 회원이 새로고침/재로그인하면 적용됩니다.</p>
+            <ModelPicker value={sharedStt} onChange={setSharedStt} noneLabel="공유 요약 모델과 동일"
+              groups={[
+                { label: "Gemini", options: modelOptions },
+                { label: "GPT (OpenAI)", options: oaSttOptions },
+              ]} placeholder="모델 ID 직접 입력" />
+            <p className="mt-1 text-xs text-slate-400">
+              GPT 모델을 지정하면 회원은 <b>내 OpenAI 키</b>로 GPT를 사용합니다 — 위 OpenAI API 키를 저장해 두세요.
+              변경 사항은 해당 회원이 새로고침/재로그인하면 적용됩니다.
+            </p>
           </div>
         )}
 
@@ -2919,6 +3003,8 @@ function Help({ onClose }) {
             "🔄 로컬 모델 불러오기"로 모델 선택 (로컬 LLM은 요약 전용).<br />
             · <b>GPT(OpenAI)</b>: ⚙️ 설정에 OpenAI 키를 넣으면 전사·요약 제공자로 GPT를 선택할 수
             있습니다. 단, GPT 전사는 화자 분리를 지원하지 않습니다 (화자 구분은 Gemini 전사 사용).<br />
+            전사 결과는 <b>[분:초] 화자 N: 내용</b> 형식으로 문장마다 시각이 붙습니다 — 원문 보기에서 특정
+            발언이 녹음의 몇 분대인지 바로 찾을 수 있습니다.<br />
             · <b>외부 연동</b>: ⚙️ 설정에서 Notion(토큰+대상 페이지/DB)·Dooray(토큰+프로젝트 ID)를
             등록하면 회의록 저장 시 Notion에 전체 내용이, Dooray에 액션 아이템이 업무로 자동 등록됩니다.
           </p>
@@ -4565,6 +4651,14 @@ export default function App() {
         }
         localStorage.removeItem("gemini_api_key");
       }
+      const legacyOa = localStorage.getItem("openai_api_key");
+      if (legacyOa) {
+        if (!m.has_own_openai_key) {
+          await api("/api/me", { method: "PUT", body: JSON.stringify({ openai_api_key: legacyOa }) });
+          m = await api("/api/me");
+        }
+        localStorage.removeItem("openai_api_key");
+      }
       setMe(m);
       // 관리자 키 사용자는 전사·요약 모두 관리자가 지정한 모델로 고정 (지정 전에는 자유 선택).
       // 제공자도 Gemini로 강제 — 로컬/GPT 제공자나 전사 전용 키로 우회할 수 없게.
@@ -4572,11 +4666,15 @@ export default function App() {
         ...p,
         apiKey: m.gemini_key,
         apiKey2: m.gemini_key2 ?? "",
+        ...(m.openai_key && { openaiKey: m.openai_key }),
         ...(m.using_admin_key && m.admin_model && {
-          model: m.admin_model,
-          sttModel: m.admin_stt_model ?? "",
-          summaryProvider: "gemini",
-          sttProvider: "gemini",
+          // 지정 모델이 GPT면 GPT 제공자 + 관리자 OpenAI 키로, Gemini면 Gemini로 고정
+          ...(isGptModel(m.admin_model)
+            ? { summaryProvider: "openai", openaiSumModel: m.admin_model }
+            : { summaryProvider: "gemini", model: m.admin_model }),
+          ...(isGptModel(m.admin_stt_model || m.admin_model)
+            ? { sttProvider: "openai", openaiSttModel: m.admin_stt_model || m.admin_model }
+            : { sttProvider: "gemini", sttModel: m.admin_stt_model ?? "" }),
           sttApiKey: "",
         }),
       }));
@@ -4906,9 +5004,9 @@ export default function App() {
     // 전사 수신 도중 문제가 생기면 해당 조각을 1회 자동 재시도:
     // - 네트워크 끊김/정지 → 복구 대기 후 재시도
     // - 반복 생성 루프 → 새 샘플링으로 재시도, 또 반복이면 받은 부분이라도 압축해 구제
-    const transcribeWithRetry = async (fileUri, mimeType, prompt, resetLive) => {
+    const transcribeWithRetry = async (fileUri, mimeType, prompt, resetLive, offsetSec = 0) => {
       const salvage = (partial) =>
-        collapseRepeats(diarizedToText(partial)).trimEnd() +
+        collapseRepeats(diarizedToText(partial, offsetSec)).trimEnd() +
         "\n(⚠️ 이 구간은 반복 생성이 감지되어 전사가 불완전할 수 있습니다)";
       try {
         return await transcribeWithGemini(fileUri, mimeType, sttKey, sttModel, addDelta, prompt, signal, addUsage);
@@ -4973,6 +5071,7 @@ export default function App() {
             t = collapseRepeats(
               (await transcribeWithOpenAI(
                 chunks[i], settings.openaiKey, settings.openaiSttModel || "gpt-4o-transcribe", signal,
+                i * CHUNK_SEC,
               )).trim(),
             );
           } else {
@@ -4988,7 +5087,9 @@ export default function App() {
                   fileUri, mimeType,
                   i === 0 ? TRANSCRIBE_PROMPT : contPrompt(i + 1, chunks.length),
                   () => setTrans((p) => ({ ...p, liveText: acc ? acc + "\n" : "" })),
+                  i * CHUNK_SEC,
                 ),
+                i * CHUNK_SEC, // 조각 내 상대시각 → 전체 녹음 기준 시각
               ),
             );
           }
@@ -5085,6 +5186,10 @@ export default function App() {
     }
   };
 
+  // ⚠️ 훅은 전부 이 조기 반환보다 위에 있어야 한다 — 로그인 화면과 앱 화면의 훅 개수가
+  // 달라지면 로그인 직후 "Rendered more hooks than during the previous render"로 흰 화면이 된다.
+  const [syncNote, setSyncNote] = useState(null); // Notion/Dooray 자동 전송 결과 배너
+
   if (!authed) return <Login onLogin={() => setAuthed(true)} />;
 
   const logout = () => {
@@ -5100,7 +5205,6 @@ export default function App() {
   // 저장 완료 → 초안·전사·선택된 오디오까지 초기화 후 상세로 이동
   // (오디오를 남겨두면 다음 회의록 작성 때 이전 파일이 그대로 전사되는 사고가 남)
   // integrations: 서버가 수행한 Notion/Dooray 자동 전송 결과 → 배너로 알림
-  const [syncNote, setSyncNote] = useState(null);
   const finishSave = (id, integrations) => {
     setDraft({ title: "", text: "" });
     setTrans(IDLE_TRANS);
