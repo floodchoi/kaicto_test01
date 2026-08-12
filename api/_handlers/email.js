@@ -49,6 +49,23 @@ const makeTransport = (cfg) =>
     auth: cfg.smtp_user ? { user: cfg.smtp_user, pass: decryptSecret(cfg.smtp_pass_enc) } : undefined,
   });
 
+// SMTP 오류를 원인이 보이는 한국어 안내로 — 무엇을 고쳐야 할지 바로 알 수 있게
+function mailError(e, cfg) {
+  const m = e?.message ?? "";
+  const where = `현재 설정: ${cfg.smtp_host}:${cfg.smtp_port ?? 587}${cfg.smtp_user ? ` · 계정 ${cfg.smtp_user}` : " · 계정 미설정"}`;
+  if (/getaddrinfo|ENOTFOUND|EAI_AGAIN|EBUSY/i.test(m))
+    return `SMTP 서버 주소를 찾을 수 없습니다 — 주소가 올바른지 확인하세요 (Gmail은 smtp.gmail.com). ${where}`;
+  if (/ECONNREFUSED|ETIMEDOUT|ESOCKET|timeout/i.test(m))
+    return `SMTP 서버에 연결하지 못했습니다 — 포트(587 또는 465)와 방화벽을 확인하세요. ${where}`;
+  if (/EAUTH|535|Username and Password not accepted|Invalid login/i.test(m))
+    return `로그인 실패 — Gmail은 로그인 비밀번호가 아니라 '앱 비밀번호'(16자)를 입력해야 합니다. ${where}`;
+  if (/Missing credentials|No authentication/i.test(m))
+    return `계정·비밀번호가 비어 있습니다 — 설정에서 계정과 (앱)비밀번호를 입력해주세요. ${where}`;
+  if (/5\.7\.0|not allowed|relay/i.test(m))
+    return `서버가 발송을 거부했습니다 — 보내는 사람 주소가 계정과 일치하는지 확인하세요. ${where} · 원본: ${m}`;
+  return `${m} · ${where}`;
+}
+
 // POST /api/email
 //  { action: "test" }                         → 내 주소로 테스트 메일
 //  { action: "send", meetingId, to, includeRaw } → 회의록 발송 (to 비우면 가입 이메일)
@@ -84,8 +101,9 @@ export default wrap(async function handler(req, res) {
       await logAct(userId, "email_send", `설정 테스트 → ${me.email}`);
       return res.status(200).json({ ok: true, to: me.email });
     } catch (e) {
+      const msg = mailError(e, me);
       await logAct(userId, "email_error", `설정 테스트: ${e.message}`);
-      return res.status(400).json({ error: `발송 실패: ${e.message}` });
+      return res.status(400).json({ error: `발송 실패: ${msg}` });
     }
   }
 
@@ -123,7 +141,8 @@ export default wrap(async function handler(req, res) {
     await logAct(userId, "email_send", `#${meetingId} ${m.title} → ${to.join(", ")}`);
     return res.status(200).json({ ok: true, to });
   } catch (e) {
+    const msg = mailError(e, me);
     await logAct(userId, "email_error", `#${meetingId} ${e.message}`);
-    return res.status(400).json({ error: `발송 실패: ${e.message}` });
+    return res.status(400).json({ error: `발송 실패: ${msg}` });
   }
 });

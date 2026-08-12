@@ -55,6 +55,11 @@ export default wrap(async function handler(req, res) {
     }
     if ("smtp_host" in b || "smtp_port" in b || "smtp_user" in b || "smtp_from" in b) {
       const host = String(b.smtp_host ?? "").trim().slice(0, 200) || null;
+      // 서버 주소 형식 검증 — "f" 같은 값이 저장돼 발송 때 DNS 오류가 나는 것을 막는다
+      if (host && !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(host))
+        return res.status(400).json({
+          error: `SMTP 서버 주소가 올바르지 않습니다 ("${host}") — 예: smtp.gmail.com`,
+        });
       const portNum = Number(b.smtp_port);
       const port = Number.isInteger(portNum) && portNum > 0 && portNum < 65536 ? portNum : 587;
       const user = String(b.smtp_user ?? "").trim().slice(0, 200) || null;
