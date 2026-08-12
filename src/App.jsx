@@ -1485,6 +1485,34 @@ function LandingHero() {
 
 
 /* ── 설정: 요약 제공자(Gemini/로컬) + 전사(Gemini) ─────────── */
+// CSV → 객체 배열. 따옴표 안의 쉼표·줄바꿈·연속 따옴표("")를 제대로 처리한다.
+function parseCsv(text) {
+  const src = text.replace(/^\ufeff/, ""); // Excel BOM 제거
+  const rows = [];
+  let row = [], field = "", quoted = false;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (quoted) {
+      if (c === '"') {
+        if (src[i + 1] === '"') { field += '"'; i++; }
+        else quoted = false;
+      } else field += c;
+    } else if (c === '"') quoted = true;
+    else if (c === ",") { row.push(field); field = ""; }
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && src[i + 1] === "\n") i++;
+      row.push(field); field = "";
+      if (row.some((v) => v !== "")) rows.push(row);
+      row = [];
+    } else field += c;
+  }
+  row.push(field);
+  if (row.some((v) => v !== "")) rows.push(row);
+  if (!rows.length) return [];
+  const head = rows[0].map((h) => h.trim());
+  return rows.slice(1).map((r) => Object.fromEntries(head.map((h, i) => [h, r[i] ?? ""])));
+}
+
 const INPUT_CLS =
   "mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100";
 
@@ -1591,6 +1619,62 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
     if (!Object.keys(body).length) return;
     await api("/api/me", { method: "PUT", body: JSON.stringify(body) });
     onServerSaved?.(); // 저장 '완료 후' 계정 정보 재조회 (새 값이 옛 값으로 덮이지 않게)
+  };
+
+  // 백업: 내려받기는 인증 헤더가 필요해 fetch → Blob으로 저장 (링크로는 인증 못 함)
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupMsg, setBackupMsg] = useState("");
+  const downloadBackup = async () => {
+    setBackupBusy(true);
+    setBackupMsg("백업 파일 만드는 중…");
+    try {
+      const res = await fetch("/api/backup", {
+        headers: { Authorization: `Bearer ${localStorage.getItem("auth_token")}` },
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? `HTTP ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `회의록백업_${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setBackupMsg("✅ 백업 파일을 내려받았습니다. 안전한 곳에 보관하세요.");
+    } catch (e) {
+      setBackupMsg("⚠️ " + e.message);
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+  const restoreBackup = async (file) => {
+    const rows = parseCsv(await file.text());
+    if (!rows.length) return setBackupMsg("⚠️ 읽을 수 있는 행이 없습니다 — 이 앱에서 받은 CSV인지 확인하세요.");
+    if (!("title" in rows[0]) || !("raw_text" in rows[0]))
+      return setBackupMsg("⚠️ CSV 형식이 다릅니다 — title·raw_text 열이 필요합니다.");
+    if (!confirm(`${rows.length}건을 복구합니다.\n같은 ID의 내 회의록은 백업 내용으로 덮어쓰고, 없으면 새로 추가합니다. 계속할까요?`))
+      return;
+    setBackupBusy(true);
+    const tot = { inserted: 0, updated: 0, skipped: 0 };
+    const errs = [];
+    try {
+      // 서버리스 본문 한도(4.5MB)를 넘지 않게 20건씩 나눠 전송
+      for (let i = 0; i < rows.length; i += 20) {
+        setBackupMsg(`복구 중… ${Math.min(i + 20, rows.length)}/${rows.length}`);
+        const r = await api("/api/backup", { method: "POST", body: JSON.stringify({ rows: rows.slice(i, i + 20) }) });
+        tot.inserted += r.inserted; tot.updated += r.updated; tot.skipped += r.skipped;
+        errs.push(...(r.errors ?? []));
+      }
+      setBackupMsg(
+        `✅ 복구 완료 — 추가 ${tot.inserted}건 · 갱신 ${tot.updated}건` +
+          (tot.skipped ? ` · 건너뜀 ${tot.skipped}건 (${errs[0] ?? ""})` : "") +
+          " · 목록은 새로고침하면 보입니다.",
+      );
+      onServerSaved?.();
+    } catch (e) {
+      setBackupMsg(`⚠️ 복구 중단: ${e.message} (추가 ${tot.inserted} · 갱신 ${tot.updated}건은 반영됨)`);
+    } finally {
+      setBackupBusy(false);
+    }
   };
 
   const testEmail = async () => {
@@ -2149,6 +2233,29 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
             비밀번호는 계정에 <b>암호화 저장</b>되며 브라우저로 내려오지 않습니다.
             <b>✉️ 테스트 발송</b>을 누르면 위에 입력한 값이 먼저 저장된 뒤 발송됩니다.
           </p>
+        </div>
+
+        {/* 백업 — 내가 보는 회의록 전체를 CSV로 내려받고, 그 파일로 되돌리기 */}
+        <div className="mt-6 border-t border-slate-100 pt-5">
+          <h3 className="text-sm font-semibold text-slate-700">백업 · 복구</h3>
+          <p className="mt-1 text-xs text-slate-500">
+            내가 작성한 회의록과 공유받은 회의록을 <b>CSV 한 파일</b>로 내려받습니다(원문·요약·아젠다·
+            액션 아이템·태그 포함). 복구하면 내 회의록은 <b>백업 내용으로 되돌리고</b> 사라진 것은 다시
+            만듭니다. 같은 파일을 여러 번 복구해도 사본이 생기지 않고, 공유받은 회의록은 원본이
+            남아 있으면 건너뜁니다 — 기존 회의록이 삭제되는 일은 없습니다.
+          </p>
+          <div className="mt-2 flex gap-2">
+            <button type="button" onClick={downloadBackup} disabled={backupBusy}
+              className="flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40">
+              ⬇️ CSV 백업 다운로드
+            </button>
+            <label className={`flex-1 cursor-pointer rounded-xl border border-slate-200 px-3 py-2 text-center text-sm font-medium text-slate-600 hover:bg-slate-50 ${backupBusy ? "pointer-events-none opacity-40" : ""}`}>
+              ⬆️ CSV로 복구
+              <input type="file" accept=".csv,text/csv" className="hidden"
+                onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) restoreBackup(f); }} />
+            </label>
+          </div>
+          {backupMsg && <p className="mt-2 rounded-lg bg-slate-50 px-3 py-1.5 text-xs text-slate-600">{backupMsg}</p>}
         </div>
 
         {saveError && <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">⚠️ {saveError}</p>}
@@ -3014,6 +3121,9 @@ function Help({ onClose }) {
             "🔄 로컬 모델 불러오기"로 모델 선택 (로컬 LLM은 요약 전용).<br />
             · <b>GPT(OpenAI)</b>: ⚙️ 설정에 OpenAI 키를 넣으면 전사·요약 제공자로 GPT를 선택할 수
             있습니다. 단, GPT 전사는 화자 분리를 지원하지 않습니다 (화자 구분은 Gemini 전사 사용).<br />
+            ⚙️ 설정 → <b>백업 · 복구</b>에서 내 회의록 전체를 CSV 한 파일로 내려받아 보관할 수 있고,
+            그 파일로 언제든 되돌릴 수 있습니다(원문·요약·아젠다·액션 아이템·태그 포함). 정기적으로
+            내려받아 두시길 권합니다.<br />
             전사 결과는 <b>[분:초] 화자 N: 내용</b> 형식으로 문장마다 시각이 붙습니다 — 원문 보기에서 특정
             발언이 녹음의 몇 분대인지 바로 찾을 수 있습니다.<br />
             · <b>외부 연동</b>: ⚙️ 설정에서 Notion(토큰+대상 페이지/DB)·Dooray(토큰+프로젝트 ID)를

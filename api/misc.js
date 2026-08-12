@@ -8,6 +8,7 @@ import integrations from "./_handlers/integrations.js";
 import inviteCodes from "./_handlers/invite-codes.js";
 import migrate from "./_handlers/migrate.js";
 import email from "./_handlers/email.js";
+import backup from "./_handlers/backup.js";
 
 const FN = {
   users,
@@ -17,6 +18,7 @@ const FN = {
   "invite-codes": inviteCodes,
   migrate,
   email,
+  backup,
 };
 
 export default async function handler(req, res) {

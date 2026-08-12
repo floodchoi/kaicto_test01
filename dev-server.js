@@ -11,7 +11,7 @@ import meetingById from "./api/meetings/[id].js";
 import misc from "./api/misc.js";
 
 // 소형 엔드포인트는 배포와 동일하게 misc 디스패처(fn=…)를 경유 (Vercel rewrites와 동일 동작)
-const MISC = new Set(["users", "log", "usage", "integrations", "invite-codes", "migrate", "email"]);
+const MISC = new Set(["users", "log", "usage", "integrations", "invite-codes", "migrate", "email", "backup"]);
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost");
