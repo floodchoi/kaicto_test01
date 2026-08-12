@@ -1556,9 +1556,47 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
   const [smtpPass, setSmtpPass] = useState("");
   const [smtpFrom, setSmtpFrom] = useState(me?.smtp_from ?? "");
   const [smtpMsg, setSmtpMsg] = useState("");
+
+  // 화면에 입력한 값 중 서버에 저장할 것들(계정 키·연동·SMTP)을 PUT.
+  // 테스트 버튼도 이걸 먼저 호출한다 — 저장을 안 누른 채 테스트해서 '예전 설정'으로
+  // 실패하던 혼란(예: SMTP 주소를 고쳤는데 옛 주소로 발송 실패)을 없애기 위해.
+  const pushServerSettings = async () => {
+    const body = {};
+    if (!adminLocked) {
+      if (apiKey.trim() !== (settings.apiKey ?? "").trim()) body.gemini_api_key = apiKey.trim();
+      if (apiKey2.trim() !== (settings.apiKey2 ?? "").trim()) body.gemini_api_key2 = apiKey2.trim();
+      if (openaiKey.trim() !== (settings.openaiKey ?? "").trim()) body.openai_api_key = openaiKey.trim();
+    }
+    if (me?.is_admin && (sharedModel.trim() !== (me.shared_model ?? "") || sharedStt.trim() !== (me.shared_stt_model ?? ""))) {
+      body.shared_model = sharedModel.trim();
+      body.shared_stt_model = sharedStt.trim();
+    }
+    if (notionToken.trim()) body.notion_token = notionToken.trim();
+    if (notionTarget.trim() !== (me?.notion_target_id ?? "") || notionType !== (me?.notion_target_type ?? "database")) {
+      body.notion_target_id = notionTarget.trim();
+      body.notion_target_type = notionType;
+    }
+    if (doorayToken.trim()) body.dooray_token = doorayToken.trim();
+    if (doorayProject.trim() !== (me?.dooray_project_id ?? "")) body.dooray_project_id = doorayProject.trim();
+    if (smtpPass.trim()) body.smtp_pass = smtpPass.trim();
+    if (
+      smtpHost !== (me?.smtp_host ?? "") || String(smtpPort) !== String(me?.smtp_port ?? 587) ||
+      smtpUser !== (me?.smtp_user ?? "") || smtpFrom !== (me?.smtp_from ?? "")
+    ) {
+      body.smtp_host = smtpHost;
+      body.smtp_port = smtpPort;
+      body.smtp_user = smtpUser;
+      body.smtp_from = smtpFrom;
+    }
+    if (!Object.keys(body).length) return;
+    await api("/api/me", { method: "PUT", body: JSON.stringify(body) });
+    onServerSaved?.(); // 저장 '완료 후' 계정 정보 재조회 (새 값이 옛 값으로 덮이지 않게)
+  };
+
   const testEmail = async () => {
-    setSmtpMsg("테스트 메일 발송 중…");
+    setSmtpMsg("설정 저장 후 테스트 메일 발송 중…");
     try {
+      await pushServerSettings(); // 입력한 서버 주소·계정으로 테스트되게 먼저 저장
       const r = await api("/api/email", { method: "POST", body: JSON.stringify({ action: "test" }) });
       setSmtpMsg(`✅ ${r.to} 로 테스트 메일을 보냈습니다 — 받은 편지함을 확인하세요.`);
     } catch (e) {
@@ -1605,8 +1643,9 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
     }
   };
   const runTest = async (action) => {
-    setTestMsg("연결 테스트 중…");
+    setTestMsg("설정 저장 후 연결 테스트 중…");
     try {
+      await pushServerSettings(); // 입력한 토큰·대상으로 테스트되게 먼저 저장
       const r = await api("/api/integrations", { method: "POST", body: JSON.stringify({ action }) });
       setTestMsg(`✅ 연결됨: ${r.title}`);
     } catch (e) {
@@ -1719,57 +1758,18 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
     localStorage.setItem("gemini_stt_api_key", next.sttApiKey);
     localStorage.setItem("gemini_stt_model", next.sttModel);
     localStorage.setItem("stt_provider", next.sttProvider);
-    localStorage.setItem("openai_api_key", next.openaiKey);
     localStorage.setItem("openai_stt_model", next.openaiSttModel);
     localStorage.setItem("openai_sum_model", next.openaiSumModel);
     onSave(next);
 
-    // 서버 저장분(계정별 키 · 예비 키 · 관리자 공유 모델 · 연동 설정) — 바뀐 경우에만 호출
-    const keyChanged = next.apiKey !== (settings.apiKey ?? "").trim();
-    const oaKeyChanged = next.openaiKey !== (settings.openaiKey ?? "").trim();
-    const key2Changed = next.apiKey2 !== (settings.apiKey2 ?? "").trim();
-    const sharedChanged =
-      me?.is_admin &&
-      (sharedModel.trim() !== (me.shared_model ?? "") || sharedStt.trim() !== (me.shared_stt_model ?? ""));
-    const integ = {};
-    if (notionToken.trim()) integ.notion_token = notionToken.trim();
-    if (notionTarget.trim() !== (me?.notion_target_id ?? "") || notionType !== (me?.notion_target_type ?? "database")) {
-      integ.notion_target_id = notionTarget.trim();
-      integ.notion_target_type = notionType;
-    }
-    if (doorayToken.trim()) integ.dooray_token = doorayToken.trim();
-    if (doorayProject.trim() !== (me?.dooray_project_id ?? "")) integ.dooray_project_id = doorayProject.trim();
-    // 이메일(SMTP): 비밀번호는 입력했을 때만, 나머지는 바뀐 경우에만 전송
-    if (smtpPass.trim()) integ.smtp_pass = smtpPass.trim();
-    if (
-      smtpHost !== (me?.smtp_host ?? "") || String(smtpPort) !== String(me?.smtp_port ?? 587) ||
-      smtpUser !== (me?.smtp_user ?? "") || smtpFrom !== (me?.smtp_from ?? "")
-    ) {
-      integ.smtp_host = smtpHost;
-      integ.smtp_port = smtpPort;
-      integ.smtp_user = smtpUser;
-      integ.smtp_from = smtpFrom;
-    }
-    if (keyChanged || oaKeyChanged || key2Changed || sharedChanged || Object.keys(integ).length) {
-      setSaving(true);
-      setSaveError(null);
-      try {
-        await api("/api/me", {
-          method: "PUT",
-          body: JSON.stringify({
-            ...(keyChanged && { gemini_api_key: next.apiKey }),
-            ...(oaKeyChanged && { openai_api_key: next.openaiKey }),
-            ...(key2Changed && { gemini_api_key2: next.apiKey2 }),
-            ...(sharedChanged && { shared_model: sharedModel.trim(), shared_stt_model: sharedStt.trim() }),
-            ...integ,
-          }),
-        });
-        onServerSaved?.(); // 서버 저장 '완료 후'에 계정 정보 재조회 (새 키가 옛 키로 덮이지 않게)
-      } catch (e) {
-        setSaveError(`저장 실패 (브라우저 설정은 저장되었습니다): ${e.message}`);
-        setSaving(false);
-        return; // 모달 유지 — 사용자가 오류를 볼 수 있게
-      }
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await pushServerSettings();
+    } catch (e) {
+      setSaveError(`저장 실패 (브라우저 설정은 저장되었습니다): ${e.message}`);
+      setSaving(false);
+      return; // 모달 유지 — 사용자가 오류를 볼 수 있게
     }
     onClose();
   };
@@ -1782,7 +1782,8 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
       >
         <h2 className="text-lg font-bold text-slate-800">설정</h2>
         <p className="mt-1 text-xs text-slate-500">
-          모든 값은 이 브라우저에만 저장되며 서버에 보관되지 않습니다.
+          모델·로컬 LLM 설정은 이 브라우저에만 저장됩니다. API 키·연동 토큰·SMTP 비밀번호는
+          내 계정에 <b>암호화</b>되어 저장되며 다른 사람은 볼 수 없습니다.
         </p>
 
         {/* 관리자 키 사용 안내 + 개인 API 사용 전환 토글 */}
@@ -2118,17 +2119,26 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
               className="text-teal-700 hover:underline">앱 비밀번호</a>를 발급해 <code>smtp.gmail.com</code> / 587로 설정하세요.
           </p>
           <div className="mt-2 flex gap-2">
-            <input value={smtpHost} onChange={(e) => setSmtpHost(e.target.value.trim())}
-              placeholder="SMTP 서버 (예: smtp.gmail.com)" className={INPUT_CLS + " mt-0 min-w-0 flex-1"} />
-            <input value={smtpPort} onChange={(e) => setSmtpPort(e.target.value.trim())}
-              placeholder="587" className={INPUT_CLS + " mt-0 w-20"} />
+            <div className="min-w-0 flex-1">
+              <label className="text-xs text-slate-500">SMTP 서버 주소</label>
+              <input value={smtpHost} onChange={(e) => setSmtpHost(e.target.value.trim())}
+                placeholder="smtp.gmail.com" className={INPUT_CLS + " mt-0.5"} />
+            </div>
+            <div className="w-20 shrink-0">
+              <label className="text-xs text-slate-500">포트</label>
+              <input value={smtpPort} onChange={(e) => setSmtpPort(e.target.value.trim())}
+                placeholder="587" className={INPUT_CLS + " mt-0.5"} />
+            </div>
           </div>
+          <label className="mt-2 block text-xs text-slate-500">계정</label>
           <input value={smtpUser} onChange={(e) => setSmtpUser(e.target.value.trim())}
-            placeholder="계정 (보통 보내는 이메일 주소)" className={INPUT_CLS} />
+            placeholder="보통 보내는 이메일 주소" className={INPUT_CLS + " mt-0.5"} />
+          <label className="mt-2 block text-xs text-slate-500">비밀번호 (Gmail은 앱 비밀번호 16자)</label>
           <input type="password" value={smtpPass} onChange={(e) => setSmtpPass(e.target.value)}
             placeholder={me?.has_smtp_pass ? "저장됨 — 변경할 때만 입력" : "비밀번호 / 앱 비밀번호"}
-            className={INPUT_CLS} />
-          <div className="mt-2 flex items-center gap-2">
+            className={INPUT_CLS + " mt-0.5"} />
+          <label className="mt-2 block text-xs text-slate-500">보내는 사람 (선택)</label>
+          <div className="mt-0.5 flex items-center gap-2">
             <input value={smtpFrom} onChange={(e) => setSmtpFrom(e.target.value.trim())}
               placeholder='보내는 사람 (선택, 예: 회의록 <me@company.com>)' className={INPUT_CLS + " mt-0 min-w-0 flex-1"} />
             <button type="button" onClick={testEmail}
@@ -2136,7 +2146,8 @@ function Settings({ settings, me, onSave, onServerSaved, onClose }) {
           </div>
           {smtpMsg && <p className="mt-2 rounded-lg bg-slate-50 px-3 py-1.5 text-xs text-slate-600">{smtpMsg}</p>}
           <p className="mt-1 text-xs text-slate-400">
-            비밀번호는 계정에 <b>암호화 저장</b>되며 브라우저로 내려오지 않습니다. 테스트는 저장 후 가능합니다.
+            비밀번호는 계정에 <b>암호화 저장</b>되며 브라우저로 내려오지 않습니다.
+            <b>✉️ 테스트 발송</b>을 누르면 위에 입력한 값이 먼저 저장된 뒤 발송됩니다.
           </p>
         </div>
 
